@@ -1821,6 +1821,33 @@ static void hdmi_tvenc_set(struct hdmitx_vidpara *param)
 		);
 		hd_set_reg_bits(P_VPU_HDMI_SETTING, 1, 1, 1);
 		break;
+	case HDMIV_CUSTOMBUILT:
+		if (((ACTIVE_PIXELS == 640)
+				&& (ACTIVE_LINES == 480))
+			|| ((ACTIVE_PIXELS == 480)
+				&& (ACTIVE_LINES == 800))) {
+			hd_write_reg(P_VPU_HDMI_SETTING, (0 << 0) |
+					(0 << 1) |
+					(0 << 2) |
+					(0 << 3) |
+					(0 << 4) |
+					(4 << 5) |
+					(0 << 8) |
+					(0 << 12)
+			);
+		} else {
+			hd_write_reg(P_VPU_HDMI_SETTING, (0 << 0) |
+					(0 << 1) | /* [	1] src_sel_encp */
+					(HSYNC_POLARITY << 2) |
+					(VSYNC_POLARITY << 3) |
+					(0 << 4) |
+					(4 << 5) |
+					(0 << 8) |
+					(0 << 12)
+			);
+		}
+		hd_set_reg_bits(P_VPU_HDMI_SETTING, 1, 1, 1);
+		break;
 	default:
 		hd_write_reg(P_VPU_HDMI_SETTING, (0 << 0) |
 				(0 << 1) | /* [	1] src_sel_encp */
