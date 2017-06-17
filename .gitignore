@@ -94,7 +94,9 @@ x509.genkey
 # customer folder
 customer
 
-#dev-scripts
+#devel
 do
 do_config
 install
+ccImage
+__*.c
