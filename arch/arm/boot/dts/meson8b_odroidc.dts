@@ -62,14 +62,10 @@
         #address-cells = <1>;
         #size-cells = <1>;
 
-        cma_0:region@0 {
-           region_name = "cma_0";
-           reg = <0 0x02a00000>;
-           linux,contiguous-region;
         };
-        };
+	
 
-        gic:interrupt-controller{
+	gic:interrupt-controller{
         compatible = "arm,cortex-a9-gic";
         reg = <0xc4301000 0x1000
                0xc4300100 0x0100>;
@@ -77,11 +73,19 @@
         #interrupt-cells = <3>;
         #address-cells = <0>;
     };
+	
+	/* Add suuport for channel switching here? */
+	dma: dma@0xda006000 {
+		compatible = "aml,amls805-dma";
+		reg = <0xda006000 0x2000>;
+		interrupts = <0 36 1>; /* 68 - 32 */
+		aml,dma-channel-num = <4>; /* Amount of channels that will be offered under /sys/class/dma/, read more about this under "Documentation" */
+	};
 
-            meson-rng {
-                    compatible = "amlogic,meson-rng";
-                    status = "ok";
-            };
+   meson-rng {
+        compatible = "amlogic,meson-rng";
+        status = "ok";
+   };
 
     vpu{
                 compatible = "amlogic,vpu";
@@ -125,31 +129,15 @@
                 reserve-memory = <0x01000000>; // 16M
         };
 
-    amvenc_avc{
-                compatible = "amlogic,amvenc_avc";
-                dev_name = "amvenc_avc.0";
-                status = "okay";
-                linux,contiguous-region = <&cma_0>;
-                reserve-iomap = "true";
-        };
-
     ion_dev{
-                compatible = "amlogic,ion_dev";
-                dev_name = "ion_dev";
-                status = "okay";
-                share-memory-name = "ppmgr0";
-                share-memory-offset = <0>;
-                share-memory-size = <0x01000000>; //16M
+        compatible = "amlogic,ion_dev";
+        dev_name = "ion_dev";
+        status = "ok";
+        share-memory-name = "ppmgr0";
+        share-memory-offset = <0>;
+        share-memory-size = <0x01000000>; //16M
     };
-
-    deinterlace{
-                compatible = "amlogic,deinterlace";
-                dev_name = "deinterlace";
-                status = "okay";
-                reserve-memory = <0x02100000>; //10x1920x1088x3/2=33M
-        };
-
-    mesonvout{
+        mesonvout{
                 compatible = "amlogic,mesonvout";
                 dev_name = "mesonvout";
                 status = "okay";
@@ -300,24 +288,6 @@
                 #size-cells = <0>;
                 use_pio = <0>;
                 master_i2c_speed = <100000>;
-
-		/* Hardkernel I2C 3.5" Touchscreen */
-		/* drivers/input/sx865x.c */
-		sx865x: sx865x@49	{
-			status = "okay";
-			compatible = "semtech,sx8650";
-			reg = <0x49>;
-			#clock-cells = <0>;
-
-			/* H/W Pin control setup */
-			gpio-pendown = "GPIOX_1";
-			gpio-reset = "GPIOX_2";
-
-			/* platform data setup */
-			invert-x = <0>;
-			invert-y = <1>;
-			swap-xy = <1>;
-		};
         };
 
     i2c@c11087e0{ /*I2C-C*/
@@ -356,71 +326,28 @@
 
         vcck_dvfs {
             dvfs_id     = <1>;                                  /** must be value of (1 << n)            */
-            table_count = <16>;                                 /** must be correct count for dvfs_table */
-            /*change-frequent-only;*/
+            table_count = <15>;                                 /** must be correct count for dvfs_table */
+            change-frequent-only;
             dvfs_table  = <
             /* NOTE: frequent in this table must be ascending order */
             /* frequent(Khz)    min_uV      max_uV                  */
-					96000         825000      825000
-					192000         825000      825000
-					312000         825000      825000
-					408000         825000      825000
-					504000         825000      825000
-					600000         825000      825000
-					720000         825000      825000
-					816000         850000      850000
-					1008000         875000      875000
-					1200000         925000      925000
-					1320000        1100000     1100000
-					1488000        1100000     1100000
-					1536000	       1140000     1140000
-					1632000	       1140000     1140000
-					1728000        1140000     1140000
-					1824000        1140000     1140000
+                  96000         825000      825000
+                 192000         825000      825000
+                 312000         825000      825000
+                 408000         825000      825000
+                 504000         825000      825000
+                 600000         825000      825000
+                 720000         825000      825000
+                 816000         850000      850000
+                1008000         875000      875000
+                1200000         925000      925000
+                1320000        1100000     1100000
+                1488000        1100000     1100000
+		1536000	       1140000     1140000
+		1632000	       1150000     1150000
+                1728000        1160000     1160000
             >;
         };
-    };
-
-    meson_vcck_dvfs_driver{
-        compatible = "amlogic, meson_vcck_dvfs";
-        dev_name = "meson_vcck_dvfs_driver";
-        status = "ok";
-        pinctrl-names = "default";
-        pinctrl-0 = <&aml_pwm_pins>;
-        use_pwm = <1>;
-        pmw_controller = "PWM_C";
-        table_count = <29>;
-        cs_voltage_table = <
-		0x10f001b        860000
-		0x1050025        870000
-		0x0fc002e        880000
-		0x0f30037        890000
-		0x0ea0040        900000
-		0x0e10049        910000
-		0x0d60054        920000
-		0x0cb005f        930000
-		0x0c0006a        940000
-		0x0b50075        950000
-		0x0aa0080        960000
-		0x0a0008a        970000
-		0x0960094        980000
-		0x08d009d        990000
-		0x07b00af        1000000
-		0x07200b8        1010000
-		0x06900c1        1020000
-		0x06000ca        1030000
-		0x05700d3        1040000
-		0x04e00dc        1050000
-		0x04500e5        1060000
-		0x03c00ee        1070000
-		0x03300f7        1080000
-		0x02a0100        1090000
-		0x0180109        1100000
-		0x00f011b        1110000
-		0x00a0120        1120000
-		0x0050125        1130000
-		0x000012a        1140000
-        >;
     };
 
     arm_pmu {
@@ -431,40 +358,6 @@
                       0     153     0x04
                       0     154     0x04>;
     };
-
-
-    usb_con {
-                lm-compatible = "logicmodule-bus";
-
-                usb_b{
-                        lm-compatible = "amlogic,usb";
-                        lm-periph-id = <1>; /** lm name */
-                        clock-src = "usb1"; /** clock src */
-                        port-id = <1>; /** ref to mach/usb.h */
-                        port-type = <1>;        /** 0: otg, 1: host, 2: slave */
-                        port-speed = <0>; /** 0: default, 1: high, 2: full */
-                        port-config = <0>; /** 0: default */
-                        port-dma = <0>; /** 0: default, 1: single, 2: incr, 3: incr4, 4: incr8, 5: incr16, 6: disable*/
-                        port-id-mode = <1>; /** 0: hardware, 1: sw_host, 2: sw_slave*/
-                        gpio-hub-rst = "GPIOAO_4";
-                        status = "okay";
-                };
-
-                usb_a{
-                        lm-compatible = "amlogic,usb";
-                        lm-periph-id = <0>; /** lm name */
-                        clock-src = "usb0"; /** clock src */
-                        port-id = <0>;  /** ref to mach/usb.h */
-                        port-type = <0>;        /** 0: otg, 1: host, 2: slave */
-                        port-speed = <0>; /** 0: default, high, 1: full */
-                        port-config = <0>; /** 0: default */
-                        port-dma = <0>; /** 0: default, 1: single, 2: incr, 3: incr4, 4: incr8, 5: incr16, 6: disable*/
-                        port-id-mode = <0>; /** 0: hardware, 1: sw_host, 2: sw_slave*/
-                        gpio-vbus-power = "GPIOAO_5";
-                        gpio-work-mask  = <1>; /**0: work on pulldown,1:work on pullup*/
-                        status = "okay";
-                };
-        };
 
     audio_platform{
         compatible = "amlogic,aml-i2s";
@@ -519,14 +412,6 @@
     odroid_sound_card{
         compatible = "sound_card, odroid_snd";
         aml,sound_card = "ODROID-DAC";
-        pinctrl-names = "odroid_i2s";
-        pinctrl-0 = <&audio_pins>;
-        status = "okay";
-    };
-
-    odroid_hifi2{
-        compatible = "sound_card, odroid_dac2";
-        aml,sound_card = "ODROID-DAC2";
         pinctrl-names = "odroid_i2s";
         pinctrl-0 = <&audio_pins>;
         status = "okay";
@@ -641,6 +526,12 @@
 		};
     };
 
+    aml_gpio_lib {
+        compatible = "aml-gpio";
+        dev_name = "aml_gpio";
+        status = "okay";
+    };
+    
     efuse{
                 compatible = "amlogic,efuse";
                 dev_name = "efuse";
@@ -1002,13 +893,6 @@
                         amlogic,pins = "GPIOX_8","GPIOX_9","GPIOX_10";
                 };
 
-		aml_pwm_pins:aml_pwm{
-			amlogic,setmask=<3 0x1000000>;
-			amlogic,clrmask=<0 0x48
-					 7 0x10000020>;
-			amlogic,pins="GPIODV_9";
-		};
-
 		odroid_pwm0:odroid_pwm0{
             amlogic,setmask=<2 0x00000008>;     /*GPIOX_11 PWM_B Reg2[3]*/
             amlogic,clrmask=<3 0x00100000
@@ -1093,10 +977,5 @@
         suspend_timeout=<6>;
     };
 
-	gpiomem {
-		compatible = "amlogic,meson-gpiomem";
-		reg = <0xc1108000 0x1000>;
-		status = "okay";
-	};
 
 }; /* end of / */

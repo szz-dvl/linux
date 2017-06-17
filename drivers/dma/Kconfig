@@ -5,6 +5,7 @@
 menuconfig DMADEVICES
 	bool "DMA Engine support"
 	depends on HAS_DMA
+	default y
 	help
 	  DMA engines can do asynchronous data transfers without
 	  involving the host CPU.  Currently, this framework can be
@@ -28,10 +29,28 @@ config DMADEVICES_VDEBUG
           say N here.  This enables deeper (more verbose) debugging of
           the DMA engine core and drivers.
 
-
 if DMADEVICES
 
 comment "DMA Devices"
+	
+config S805_DMAC
+	bool "Support for S805 DMAC"
+	depends on GENERIC_HARDIRQS
+	select DMA_ENGINE
+	select DMA_VIRTUAL_CHANNELS
+	select ASYNC_TX_DMA
+	default y if MACH_MESON8B_ODROIDC
+	help
+	  This adds support for the Amlogic s805 Direct Memory Access Controller,
+	  this driver was developed for Odroid C1+, if other board is being used 
+	  malfunction can occur.
+
+          /* The linux interface for this dmaengine is being developed at the moment,
+          It is now in a beta stage and it is lacking a lot of testing. So ... */
+		 
+	  Say Y if you are using the Amlogic s805 SoC. /* ... and you want to lend a hand! */
+
+	  If usure say N.
 
 config INTEL_MID_DMAC
 	tristate "Intel MID DMA support for Peripheral DMA controllers"
@@ -48,7 +67,7 @@ config INTEL_MID_DMAC
 
 config ASYNC_TX_ENABLE_CHANNEL_SWITCH
 	bool
-
+	
 config AMBA_PL08X
 	bool "ARM PrimeCell PL080 or PL081 support"
 	depends on ARM_AMBA
@@ -314,7 +333,7 @@ config MMP_PDMA
 
 config DMA_ENGINE
 	bool
-
+	
 config DMA_VIRTUAL_CHANNELS
 	tristate
 

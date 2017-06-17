@@ -93,3 +93,8 @@ x509.genkey
 
 # customer folder
 customer
+
+#dev-scripts
+do
+do_config
+install
