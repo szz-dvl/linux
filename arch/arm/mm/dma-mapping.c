@@ -76,7 +76,7 @@ static dma_addr_t arm_dma_map_page(struct device *dev, struct page *page,
 	if (!dma_get_attr(DMA_ATTR_SKIP_CPU_SYNC, attrs))
 		__dma_page_cpu_to_dev(page, offset, size, dir);
 	return pfn_to_dma(dev, page_to_pfn(page)) + offset;
-}
+} 
 
 static dma_addr_t arm_coherent_dma_map_page(struct device *dev, struct page *page,
 	     unsigned long offset, size_t size, enum dma_data_direction dir,
@@ -502,6 +502,8 @@ static void *__alloc_from_pool(size_t size, struct page **ret_page)
 		return NULL;
 	}
 
+    pr_info("Inside: __alloc_from_pool: %u\n", size);
+	
 	/*
 	 * Align the region allocation - allocations from pool are rather
 	 * small, so align them to their order in pages, minimum is a page
@@ -538,7 +540,7 @@ static bool __in_atomic_pool(void *start, size_t size)
 
 	if (end <= pool_end)
 		return true;
-
+	
 	WARN(1, "Wrong coherent size(%p-%p) from atomic pool(%p-%p)\n",
 	     start, end - 1, pool_start, pool_end - 1);
 
@@ -573,6 +575,8 @@ static void *__alloc_from_contiguous(struct device *dev, size_t size,
 	struct page *page;
 	void *ptr;
 
+    pr_info("Inside: __alloc_from_contiguous: %u\n", size);
+	
 	page = dma_alloc_from_contiguous(dev, count, order);
 	if (!page)
 		return NULL;
@@ -647,7 +651,7 @@ static void *__dma_alloc(struct device *dev, size_t size, dma_addr_t *handle,
 	u64 mask = get_coherent_dma_mask(dev);
 	struct page *page = NULL;
 	void *addr;
-
+		
 #ifdef CONFIG_DMA_API_DEBUG
 	u64 limit = (mask + 1) & ~mask;
 	if (limit && size >= limit) {
@@ -673,7 +677,7 @@ static void *__dma_alloc(struct device *dev, size_t size, dma_addr_t *handle,
 	gfp &= ~(__GFP_COMP);
 
 	*handle = DMA_ERROR_CODE;
-	size = PAGE_ALIGN(size);
+    size = PAGE_ALIGN(size);
 
 	if (is_coherent || nommu())
 		addr = __alloc_simple_buffer(dev, size, gfp, &page);
@@ -700,6 +704,8 @@ void *arm_dma_alloc(struct device *dev, size_t size, dma_addr_t *handle,
 	pgprot_t prot = __get_dma_pgprot(attrs, pgprot_kernel);
 	void *memory;
 
+	//dev_warn(dev, "DMA: Llego NON coherent!\n");
+	
 	if (dma_alloc_from_coherent(dev, size, handle, &memory))
 		return memory;
 
@@ -713,6 +719,8 @@ static void *arm_coherent_dma_alloc(struct device *dev, size_t size,
 	pgprot_t prot = __get_dma_pgprot(attrs, pgprot_kernel);
 	void *memory;
 
+	//dev_warn(dev, "DMA: Llego coherent!\n");
+	
 	if (dma_alloc_from_coherent(dev, size, handle, &memory))
 		return memory;
 

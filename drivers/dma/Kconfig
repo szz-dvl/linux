@@ -16,6 +16,7 @@ menuconfig DMADEVICES
 
 config DMADEVICES_DEBUG
         bool "DMA Engine debugging"
+	select DMA_API_DEBUG
         depends on DMADEVICES != n
         help
           This is an option for use by developers; most people should

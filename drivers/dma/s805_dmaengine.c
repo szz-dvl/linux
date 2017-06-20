@@ -592,7 +592,7 @@ s805_dma_prep_interleaved (struct dma_chan *chan,
 						act_size = S805_DMA_MAX_BURST;
 					
 					if ((table->count + act_size) >= S805_MAX_TR_SIZE || last.size != xt->sgl[idx].size || last.icg != xt->sgl[idx].icg) {
-						
+
 						list_add_tail(&desc_tbl->elem, &d->desc_list);
 						
 						desc_tbl = ileaved_def_init_new_tdesc(c, xt, count, byte_cnt);
@@ -632,7 +632,7 @@ s805_dma_prep_interleaved (struct dma_chan *chan,
 					}
 						
 					if (xt->sgl[idx].icg > S805_DMA_MAX_SKIP) {
-
+						
 						list_add_tail(&desc_tbl->elem, &d->desc_list);
 							
 						desc_tbl = ileaved_def_init_new_tdesc(c, xt, count, byte_cnt);
@@ -692,11 +692,11 @@ s805_dma_prep_interleaved (struct dma_chan *chan,
 					}
 				}
 			}
+
+			last.icg  = xt->sgl[idx].icg;
+			last.size = act_size;
 			
 		} //j
-
-		last.icg  = xt->sgl[idx].icg;
-		last.size = act_size;
 		
 	} //i
 
@@ -1281,7 +1281,7 @@ s805_dma_prep_memcpy (struct dma_chan *chan,
 			
 	}
 	
-	/* Assert cyclic true for this descriptor */
+	/* Assert cyclic false for this descriptor */
 	c->cyclic = false;
 	
 	return vchan_tx_prep(&c->vc, &d->vd, flags);
@@ -1314,7 +1314,7 @@ s805_dma_prep_memset (struct dma_chan *chan,
 	struct s805_desc *d;
 	s805_dtable * desc_tbl, * temp;
 	unsigned int tmp_size, act_size, bytes = 0;
-	
+
 	/* Allocate and setup the descriptor. */
 	d = kzalloc(sizeof(struct s805_desc), GFP_NOWAIT);
 	if (!d)
@@ -1327,12 +1327,12 @@ s805_dma_prep_memset (struct dma_chan *chan,
 	d->memset = kzalloc(sizeof(struct memset_info), GFP_NOWAIT);
 	
 	if (!d->memset) {
-
+		
 		kfree(d);
 		return NULL;
-
+		
 	}
-
+	
 	d->memset->value = dma_alloc_coherent(chan->device->dev,
 										  sizeof(long long),
 										  &d->memset->paddr,
@@ -1682,6 +1682,7 @@ static struct s805_desc * s805_dma_fetch_tr ( dma_cookie_t cookie ) {
 		
 		last->table->control |= S805_DTBL_IRQ;
 		ret = last->parent;
+		pr_info("Last IRQ");
 	}
 
 	for ( j = 0, i = (thread_mask & 0x01);
@@ -2020,12 +2021,9 @@ enum dma_status s805_dma_tx_status(struct dma_chan *chan,
 								   struct dma_tx_state *txstate) 
 {
 	
-	struct s805_chan *c = to_s805_dma_chan(chan);
-	struct virt_dma_desc * vd;
 	enum dma_status ret;
-	struct s805_desc * d;
 	struct thread_state * thread;
-	s805_dtable *desc;
+	s805_dtable *desc, * temp;
 	u32 residue = 0;
 	
 	ret = dma_cookie_status(chan, cookie, txstate);
@@ -2033,29 +2031,17 @@ enum dma_status s805_dma_tx_status(struct dma_chan *chan,
 	if (ret == DMA_SUCCESS)
 		return ret;
 	
-    vd = vchan_find_desc(&c->vc, cookie);
+	list_for_each_entry (thread, &mgr->thread_usage, elem) {
 
-	if (vd) {
-
-		d = to_s805_dma_desc(&vd->tx);
-		
-		list_for_each_entry (desc, &d->desc_list, elem) 	
-			residue += desc->table->count;
-		
-	} else {
-		
-		list_for_each_entry(thread, &mgr->thread_usage, elem) {
+		list_for_each_entry_safe (desc, temp, &thread->dlist, elem) {
 			
-			list_for_each_entry (desc, &thread->dlist, elem) {
-				
-				if (desc->parent->vd.tx.cookie == cookie) 
-					residue += desc->table->count;
-			}
+			if (desc->parent->vd.tx.cookie == cookie) 
+				residue += desc->table->count;
 		}
 	}
-
+	
 	dma_set_residue(txstate, residue);
-
+	
 	return ret;
 }
 
@@ -2108,7 +2094,7 @@ static int s805_dma_alloc_chan_resources(struct dma_chan *chan)
 
 	c->pool = dma_pool_create(dev_name(dev),
 							  dev,
-							  sizeof(struct s805_table_desc) * S805_DMA_MAX_DESC,
+							  sizeof(struct s805_table_desc),
 							  sizeof(struct s805_table_desc),
 							  0);
 	if (!c->pool) {
