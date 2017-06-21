@@ -502,7 +502,7 @@ static void *__alloc_from_pool(size_t size, struct page **ret_page)
 		return NULL;
 	}
 
-    pr_info("Inside: __alloc_from_pool: %u\n", size);
+    //pr_info("Inside: __alloc_from_pool: %u\n", size); SANTI
 	
 	/*
 	 * Align the region allocation - allocations from pool are rather
@@ -575,7 +575,7 @@ static void *__alloc_from_contiguous(struct device *dev, size_t size,
 	struct page *page;
 	void *ptr;
 
-    pr_info("Inside: __alloc_from_contiguous: %u\n", size);
+    //pr_info("Inside: __alloc_from_contiguous: %u\n", size); SANTI
 	
 	page = dma_alloc_from_contiguous(dev, count, order);
 	if (!page)
@@ -703,8 +703,6 @@ void *arm_dma_alloc(struct device *dev, size_t size, dma_addr_t *handle,
 {
 	pgprot_t prot = __get_dma_pgprot(attrs, pgprot_kernel);
 	void *memory;
-
-	//dev_warn(dev, "DMA: Llego NON coherent!\n");
 	
 	if (dma_alloc_from_coherent(dev, size, handle, &memory))
 		return memory;
@@ -718,8 +716,6 @@ static void *arm_coherent_dma_alloc(struct device *dev, size_t size,
 {
 	pgprot_t prot = __get_dma_pgprot(attrs, pgprot_kernel);
 	void *memory;
-
-	//dev_warn(dev, "DMA: Llego coherent!\n");
 	
 	if (dma_alloc_from_coherent(dev, size, handle, &memory))
 		return memory;

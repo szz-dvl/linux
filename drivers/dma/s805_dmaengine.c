@@ -606,8 +606,8 @@ s805_dma_prep_interleaved (struct dma_chan *chan,
 			
 			if (xt->dst_sgl || xt->src_sgl) {
 				
-				if ( xt->sgl[idx].icg == 0 )
-					dev_warn(c->vc.chan.device->dev, "ICG size 0 received for data chunk %d while src_sgl / dst_sgl evaluates to true.\n", idx);
+				/* if ( xt->sgl[idx].icg == 0 ) */
+				/* 	dev_warn(c->vc.chan.device->dev, "ICG size 0 received for data chunk %d while src_sgl / dst_sgl evaluates to true.\n", idx); */
 				
 					
 				for (tmp_size = xt->sgl[idx].size; tmp_size > 0; tmp_size -= S805_DMA_MAX_BURST) {
@@ -617,8 +617,9 @@ s805_dma_prep_interleaved (struct dma_chan *chan,
 					else
 						act_size = S805_DMA_MAX_BURST;
 					
-					if ((table->count + act_size) >= S805_MAX_TR_SIZE || last.size != xt->sgl[idx].size || last.icg != xt->sgl[idx].icg) {
-
+					if ( ((table->count + act_size) >= S805_MAX_TR_SIZE || last.size != xt->sgl[idx].size || last.icg != xt->sgl[idx].icg) &&
+						 ((table->src_skip != 0 && xt->src_sgl) || (table->dst_skip != 0 && xt->dst_sgl)) ) {
+						
 						list_add_tail(&desc_tbl->elem, &d->desc_list);
 						
 						desc_tbl = ileaved_def_init_new_tdesc(c, xt, count, byte_cnt, d->frames);
@@ -1606,17 +1607,20 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 #ifdef DEBUG
 
 		list_for_each_entry_safe (desc, temp, &d->desc_list, elem) {
-			
-			dev_dbg(d->c->vc.chan.device->dev, "Descriptor (0x%08X) >> ctrl = 0x%08X, src = 0x%08X, dst = 0x%08X, byte_cnt = %u, src_burst = %u, src_skip = %u, dst_burst = %u, dst_skip = %u\n",
-					desc->paddr,
-					desc->table->control, 
-					desc->table->src, 
-					desc->table->dst, 
-					desc->table->count,
-					desc->table->src_burst,
-					desc->table->src_skip,
-					desc->table->dst_burst,
-					desc->table->dst_skip);
+
+			if (!list_is_last(&desc->elem, &d->desc_list)) {
+
+				dev_dbg(d->c->vc.chan.device->dev, "Descriptor (0x%08X) >> ctrl = 0x%08X, src = 0x%08X, dst = 0x%08X, byte_cnt = %u, src_burst = %u, src_skip = %u, dst_burst = %u, dst_skip = %u\n",
+						desc->paddr,
+						desc->table->control, 
+						desc->table->src, 
+						desc->table->dst, 
+						desc->table->count,
+						desc->table->src_burst,
+						desc->table->src_skip,
+						desc->table->dst_burst,
+						desc->table->dst_skip);
+			}
 		}
 #endif
 		if (list_empty(&d->desc_list)) {
@@ -1949,30 +1953,28 @@ enum dma_status s805_dma_tx_status(struct dma_chan *chan,
 {
 	
 	enum dma_status ret;
-	/* struct s805_desc * d, * temp; */
-	/* s805_dtable *desc; */
-	/* u32 residue = 0; */
+	struct s805_desc * d, * temp;
+	s805_dtable *desc;
+	u32 residue = 0;
 	
 	ret = dma_cookie_status(chan, cookie, txstate);
-
-	return ret;
 	
-	/* if (ret == DMA_SUCCESS) */
-	/* 	return ret; */
+	if (ret == DMA_SUCCESS)
+		return ret;
 
-	/* /\* Underprotected: to be tested! *\/ */
-	/* list_for_each_entry_safe (d, temp, &mgr->dlist, elem) { */
+	/* Underprotected: to be tested! */
+	list_for_each_entry_safe (d, temp, &mgr->dlist, elem) {
 		
-	/* 	if (d->vd.tx.cookie == cookie) { */
+		if (d->vd.tx.cookie == cookie) {
 			
-	/* 		list_for_each_entry (desc, &d->desc_list, elem) */
-	/* 			residue += desc->table->count; */
-	/* 	} */
-	/* } */
+			list_for_each_entry (desc, &d->desc_list, elem)
+				residue += desc->table->count;
+		}
+	}
 	
-	/* dma_set_residue(txstate, residue); */
+	dma_set_residue(txstate, residue);
 	
-	/* return ret; */
+	return ret;
 }
 
 /*
