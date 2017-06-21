@@ -208,15 +208,54 @@ static inline struct s805_desc *to_s805_dma_desc(struct dma_async_tx_descriptor 
 	return container_of(t, struct s805_desc, vd.tx);
 }
 
+/* 
+   
+   Adds a zeroed descriptor at the end of the current list, if possible. 
+   To detect the end of the transaction. 
+   
+*/
+static void add_zeroed_tdesc (struct s805_desc * d)
+{
+	
+	s805_dtable * desc_tbl = kzalloc(sizeof(s805_dtable), GFP_NOWAIT);
+	
+	if (!desc_tbl) 
+	    return;
+	
+	desc_tbl->table = dma_pool_alloc(d->c->pool, GFP_NOWAIT | __GFP_ZERO, &desc_tbl->paddr); /* __GFP_ZERO: Not Working. */
+	
+	if (!desc_tbl->table) {
+		
+		kfree(desc_tbl);
+		return;
+		
+	} else
+		*desc_tbl->table = (struct s805_table_desc) { 0 };
+
+	list_add_tail(&desc_tbl->elem, &d->desc_list);
+		
+}
+
 /* Auxiliar function to initialize descriptors. */
-static s805_dtable * def_init_new_tdesc (struct s805_chan *c, unsigned int frames)
+static s805_dtable * def_init_new_tdesc (struct s805_chan * c, unsigned int frames)
 {
 	
 	s805_dtable * desc_tbl = kzalloc(sizeof(s805_dtable), GFP_NOWAIT);
 	
 	if (!desc_tbl) 
 	    return NULL;
-	
+
+	/* 
+	   There is here a remote possibilitie of malfunction. Since the pool will allocate, in first instance, a whole page to deliver our 32 Bytes blocks
+	   if more than PAGE_SIZE / 32 = 128 blocks are allocated for a transaction and the pages allocated by the pool are not contiguous the descriptors 
+	   won't be contiguous in memory, hence the hardware won't be able to fetch the descriptor 129 letting the transaction unfinished. This can be simply
+	   overcomed by setting the value of S805_DMA_MAX_DESC to 127, so big transactions (of more than 127 data chunks) will interrupt us every time the 
+	   page where the descriptor is located attempt to change, independently of the hardware limitation of 256 descriptors. 
+
+	   In the final version of the driver this will probably be as exposed above, it is, with S805_DMA_MAX_DESC evaluating to 127, preserved this way for 
+	   testing purposes.
+	   
+	*/
 	desc_tbl->table = dma_pool_alloc(c->pool, GFP_NOWAIT | __GFP_ZERO, &desc_tbl->paddr); /* __GFP_ZERO: Not Working. */
 	
 	if (!desc_tbl->table) {
@@ -233,7 +272,7 @@ static s805_dtable * def_init_new_tdesc (struct s805_chan *c, unsigned int frame
 	desc_tbl->table->control |= S805_DTBL_NO_BREAK;                   /* Process the whole descriptor at once, without thread switching (mandatory to reduce IRQs) TBE*/
 
 	if (frames && !(frames % S805_DMA_MAX_DESC))
-		desc_tbl->table->control |= S805_DMA_MAX_DESC;
+		desc_tbl->table->control |= S805_DTBL_IRQ;
 		
 	return desc_tbl;
 	
@@ -408,6 +447,8 @@ s805_dma_prep_slave_sg( struct dma_chan *chan,
 
 	/* Ensure that the last descriptor will interrupt us. */
 	list_entry(d->desc_list.prev, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
+
+	add_zeroed_tdesc(d);
 	
 	/* Assert cyclic false for this descriptor */
 	d->cyclic = false;
@@ -688,6 +729,8 @@ s805_dma_prep_interleaved (struct dma_chan *chan,
 	/* Ensure the last descriptor will interrupt us */
     table->control |= S805_DTBL_IRQ;
 	list_add_tail(&desc_tbl->elem, &d->desc_list);
+
+	add_zeroed_tdesc(d);
 	
 	/* Assert cyclic false for this descriptor */
 	d->cyclic = false;
@@ -901,6 +944,8 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 
 	/* Ensure that the last descriptor will interrupt us. */
 	list_entry(d->desc_list.prev, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
+
+	add_zeroed_tdesc(d);
 	
 	/* Assert cyclic true for this descriptor */
 	d->cyclic = true;
@@ -1196,6 +1241,8 @@ s805_dma_prep_sg (struct dma_chan *chan,
 
 	/* Ensure that the last descriptor will interrupt us. */
 	list_entry(d->desc_list.prev, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
+
+	add_zeroed_tdesc(d);
 	
 	/* Assert cyclic false for this descriptor */
 	d->cyclic = false;
@@ -1270,6 +1317,8 @@ s805_dma_prep_memcpy (struct dma_chan *chan,
 	
 	/* Ensure that the last descriptor will interrupt us. */
 	list_entry(d->desc_list.prev, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
+
+	add_zeroed_tdesc(d);
 	
 	/* Assert cyclic false for this descriptor */
 	d->cyclic = false;
@@ -1386,6 +1435,8 @@ s805_dma_prep_memset (struct dma_chan *chan,
 
 	/* Ensure that the last descriptor will interrupt us. */
 	list_entry(d->desc_list.prev, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
+
+	add_zeroed_tdesc(d);
 	
 	/* Assert cyclic false for this descriptor */
 	d->cyclic = false;
@@ -1464,10 +1515,10 @@ static void s805_dma_desc_free(struct virt_dma_desc *vd)
 
 	if (d->memset)
 		dma_free_coherent(d->c->vc.chan.device->dev, sizeof(long long), d->memset->value, d->memset->paddr);
+
+	dev_dbg(d->c->vc.chan.device->dev, "Descriptor 0x%p: Freed.", vd);
 	
 	kfree(d);
-
-	dev_dbg(d->c->vc.chan.device->dev, "Descriptor %p: Freed.", vd);
 }
 
 /*
@@ -1556,8 +1607,7 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 
 		list_for_each_entry_safe (desc, temp, &d->desc_list, elem) {
 			
-			dev_dbg(d->c->vc.chan.device->dev, "Descriptor %p (0x%08X) >> ctrl = 0x%08X, src = 0x%08X, dst = 0x%08X, byte_cnt = %u, src_burst = %u, src_skip = %u, dst_burst = %u, dst_skip = %u\n",
-					vd,
+			dev_dbg(d->c->vc.chan.device->dev, "Descriptor (0x%08X) >> ctrl = 0x%08X, src = 0x%08X, dst = 0x%08X, byte_cnt = %u, src_burst = %u, src_skip = %u, dst_burst = %u, dst_skip = %u\n",
 					desc->paddr,
 					desc->table->control, 
 					desc->table->src, 
@@ -1693,11 +1743,9 @@ static irqreturn_t s805_dma_callback (int irq, void *data)
 			
 			pr_info("s805_dma_callback: Processing descriptor: frames => %u\n", d->frames);
 			
-			d->frames -= min(d->frames, (uint) S805_DMA_MAX_DESC);
-			
 			/* All the transaction has been processed, fetch a new descriptor.*/
 			
-			if (!d->frames) {
+			if (!d->next) {
 
 				if (d->cyclic) {
 
@@ -1718,8 +1766,10 @@ static irqreturn_t s805_dma_callback (int irq, void *data)
 					dev_dbg(d->c->vc.chan.device->dev, "Marking cookie %d completed.\n", d->vd.tx.cookie);
 					
 					spin_lock(&d->c->vc.lock);
-					vchan_cookie_complete(&d->vd);
+					
 					d->c->status = DMA_SUCCESS;
+					vchan_cookie_complete(&d->vd);
+					
 					spin_unlock(&d->c->vc.lock);
 				    
 				}
@@ -1732,6 +1782,8 @@ static irqreturn_t s805_dma_callback (int irq, void *data)
 				   If we reach this code the scheduled descriptor have more than S805_DMA_MAX_DESC data chunks, 
 				   so we need to restart the transaction from the last descriptor processed. 
 				*/
+
+				d->frames -= S805_DMA_MAX_DESC;
 				
 				d->next = s805_dma_allocate_tr (d->next, d->frames);
 				s805_dma_thread_enable();
@@ -1897,28 +1949,30 @@ enum dma_status s805_dma_tx_status(struct dma_chan *chan,
 {
 	
 	enum dma_status ret;
-	struct s805_desc * d, * temp;
-	s805_dtable *desc;
-	u32 residue = 0;
+	/* struct s805_desc * d, * temp; */
+	/* s805_dtable *desc; */
+	/* u32 residue = 0; */
 	
 	ret = dma_cookie_status(chan, cookie, txstate);
-	
-	if (ret == DMA_SUCCESS)
-		return ret;
 
-	/* Underprotected: to be tested! */
-	list_for_each_entry_safe (d, temp, &mgr->dlist, elem) {
-		
-		if (d->vd.tx.cookie == cookie) {
-			
-			list_for_each_entry (desc, &d->desc_list, elem)
-				residue += desc->table->count;
-		}
-	}
-	
-	dma_set_residue(txstate, residue);
-	
 	return ret;
+	
+	/* if (ret == DMA_SUCCESS) */
+	/* 	return ret; */
+
+	/* /\* Underprotected: to be tested! *\/ */
+	/* list_for_each_entry_safe (d, temp, &mgr->dlist, elem) { */
+		
+	/* 	if (d->vd.tx.cookie == cookie) { */
+			
+	/* 		list_for_each_entry (desc, &d->desc_list, elem) */
+	/* 			residue += desc->table->count; */
+	/* 	} */
+	/* } */
+	
+	/* dma_set_residue(txstate, residue); */
+	
+	/* return ret; */
 }
 
 /*
