@@ -51,6 +51,15 @@
 #define S805_DMA_DLST_STR0               P_NDMA_THREAD_TABLE_START0
 #define S805_DMA_DLST_CURR0              P_NDMA_THREAD_TABLE_CURR0
 #define S805_DMA_DLST_END0               P_NDMA_THREAD_TABLE_END0
+#define S805_DMA_DLST_STR1               P_NDMA_THREAD_TABLE_START1
+#define S805_DMA_DLST_CURR1              P_NDMA_THREAD_TABLE_CURR1
+#define S805_DMA_DLST_END1               P_NDMA_THREAD_TABLE_END1
+#define S805_DMA_DLST_STR2               P_NDMA_THREAD_TABLE_START2
+#define S805_DMA_DLST_CURR2              P_NDMA_THREAD_TABLE_CURR2
+#define S805_DMA_DLST_END2               P_NDMA_THREAD_TABLE_END2
+#define S805_DMA_DLST_STR3               P_NDMA_THREAD_TABLE_START3
+#define S805_DMA_DLST_CURR3              P_NDMA_THREAD_TABLE_CURR3
+#define S805_DMA_DLST_END3               P_NDMA_THREAD_TABLE_END3
 
 #define S805_DMA_ENABLE                  BIT(14)                 /* Both CTRL and CLK resides in the same bit */  
 
@@ -92,7 +101,7 @@ struct s805_dmadev
 	int irq_number;                   /* IRQ number. */
     uint chan_available;              /* Amount of channels available. */
 	
-    struct list_head dlist;           /* List of descriptor currently scheduled. */
+    struct list_head dlist;           /* List of descriptors currently scheduled. */
 	struct s805_desc *desc;           /* Actual descriptor being processed. */
 	
 };
@@ -246,10 +255,10 @@ static s805_dtable * def_init_new_tdesc (struct s805_chan * c, unsigned int fram
 	    return NULL;
 
 	/* 
-	   There is here a remote possibilitie of malfunction. Since the pool will allocate, in first instance, a whole page to deliver our 32 Bytes blocks
+	   There is here a remote possibility of malfunction. Since the pool will allocate, in first instance, a whole page to deliver our 32 Bytes blocks
 	   if more than PAGE_SIZE / 32 = 128 blocks are allocated for a transaction and the pages allocated by the pool are not contiguous the descriptors 
 	   won't be contiguous in memory, hence the hardware won't be able to fetch the descriptor 129 letting the transaction unfinished. This can be simply
-	   overcomed by setting the value of S805_DMA_MAX_DESC to 127, so big transactions (of more than 127 data chunks) will interrupt us every time the 
+	   overcomed by setting the value of S805_DMA_MAX_DESC to 128, so big transactions (of more than 128 data chunks) will interrupt us every time the 
 	   page where the descriptor is located attempt to change, independently of the hardware limitation of 256 descriptors. 
 
 	   In the final version of the driver this will probably be as exposed above, it is, with S805_DMA_MAX_DESC evaluating to 127, preserved this way for 
@@ -1522,7 +1531,6 @@ static void s805_dma_desc_free(struct virt_dma_desc *vd)
 	kfree(d);
 }
 
-
 /*
   
   Write general CLK register to enable engine  
@@ -1557,7 +1565,7 @@ static inline void s805_dma_thread_disable ( void ) {
   
   @addr: address of the descriptor to be processed.
   @frames: amount of descriptors to be processed.
-
+  
 */
 
 static dma_addr_t s805_dma_allocate_tr (dma_addr_t addr, uint frames) 
