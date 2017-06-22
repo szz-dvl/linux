@@ -1710,6 +1710,8 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 		}
 		
 		if (d) {
+
+			list_move_tail(&d->elem, &mgr->in_progress);
 			
 			d->next = s805_dma_allocate_tr (thread,
 											d->next ? d->next : list_first_entry(&d->desc_list,
@@ -1718,8 +1720,6 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 											d->frames);
 			
 		    d->c->status = DMA_IN_PROGRESS;
-			
-			list_move_tail(&d->elem, &mgr->in_progress);
 			
 			s805_dma_thread_enable(thread);
 			
@@ -1815,12 +1815,12 @@ static void s805_dma_process_completed ( void )
 			dev_dbg(d->c->vc.chan.device->dev, "Re-scheduling cookie %d, frames left: %u.\n", d->vd.tx.cookie, d->frames);
 			
 			if (d->c->status != DMA_PAUSED) {
-				
-				d->next = s805_dma_allocate_tr (thread, d->next, d->frames);
-				
+
 				spin_lock(&mgr->lock);
 				list_move_tail(&d->elem, &mgr->in_progress);
 				spin_unlock(&mgr->lock);
+				
+				d->next = s805_dma_allocate_tr (thread, d->next, d->frames);
 				
 				s805_dma_thread_enable(thread);
 				thread ++;
