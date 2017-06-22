@@ -19,8 +19,8 @@
 #include <linux/kernel.h>
 #include <linux/kthread.h>
 #include <linux/interrupt.h>
+#include <linux/preempt.h>
 
-/* #include <linux/preempt.h> */
 /* #include <linux/irqflags.h> */
 
 #include "virt-dma.h"
@@ -269,12 +269,13 @@ static s805_dtable * def_init_new_tdesc (struct s805_chan * c, unsigned int fram
 	/* Control common part */
 	desc_tbl->table->control |= S805_DTBL_PRE_ENDIAN;
 	desc_tbl->table->control |= S805_DTBL_INLINE_TYPE(INLINE_NORMAL); /* To Do: Add support for crypto types */
-	desc_tbl->table->control |= S805_DTBL_NO_BREAK;                   /* 
+
+	/* desc_tbl->table->control |= S805_DTBL_NO_BREAK;                   
 																		 Process the whole descriptor at once, without thread switching 
 																		 
 																		 This needs to be tested with this approach, if this bit is set the threads will be processed at once, 
 																		 without thread switching, what will make that the interrupts to be delivered more separated in time, however
-																		 if this bit is not set the work of the active threads will be, in some manner, balanced so is we see the
+																		 if this bit is not set the work of the active threads will be, in some manner, balanced so if we see the
 																		 the 4 threads, with its possible active transactions, as a batch of transactions (what is actually what this
 																		 implementation tries) to not set this bit may be a benefit, specially if "in_progress" transactions differ
 																		 in size. In the other hand if "in_progress" transactions are similar in size interrupts may be delivered very
@@ -1723,7 +1724,10 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 			s805_dma_thread_enable(thread);
 			
 		    mgr->busy = true;
-		} 
+			
+		} else
+			s805_dma_thread_disable(thread);
+			
 	}
 }
 
@@ -1850,11 +1854,24 @@ static irqreturn_t s805_dma_callback (int irq, void *data)
 {
 
 	struct s805_dmadev * m = (struct s805_dmadev *) data;
+
+	/* 
+	   
+	   Will the preemption protection suffice here to ensure that we move the elements of the 
+	   "in_progress" queue to the "completed" queue in the same order IRQs arrive?
+	   so we can guarantee that "s805_dma_process_completed" is called only once for each batch
+	   of descriptors? Hints accepted ... ¬¬'.
+	
+	*/
+	
+	preempt_disable();
 	
 	list_move_tail (&list_first_entry(&m->in_progress,
 									  s805_dtable,
 									  elem)->elem,
 					&m->completed);
+
+	preempt_enable();
 	
 	if (list_empty(&m->in_progress)) {
 		
