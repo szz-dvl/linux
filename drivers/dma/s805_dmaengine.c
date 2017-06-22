@@ -269,10 +269,30 @@ static s805_dtable * def_init_new_tdesc (struct s805_chan * c, unsigned int fram
 	/* Control common part */
 	desc_tbl->table->control |= S805_DTBL_PRE_ENDIAN;
 	desc_tbl->table->control |= S805_DTBL_INLINE_TYPE(INLINE_NORMAL); /* To Do: Add support for crypto types */
-	desc_tbl->table->control |= S805_DTBL_NO_BREAK;                   /* Process the whole descriptor at once, without thread switching (mandatory to reduce IRQs) TBE*/
+	desc_tbl->table->control |= S805_DTBL_NO_BREAK;                   /* 
+																		 Process the whole descriptor at once, without thread switching 
+																		 
+																		 This needs to be tested with this approach, if this bit is set the threads will be processed at once, 
+																		 without thread switching, what will make that the interrupts to be delivered more separated in time, however
+																		 if this bit is not set the work of the active threads will be, in some manner, balanced so is we see the
+																		 the 4 threads, with its possible active transactions, as a batch of transactions (what is actually what this
+																		 implementation tries) to not set this bit may be a benefit, specially if "in_progress" transactions differ
+																		 in size. In the other hand if "in_progress" transactions are similar in size interrupts may be delivered very
+																		 close in time, hence "nestedly preempted", what may cause malfunction.
+																		 
+																		 As exposed above, to be tested. 
+																		 
+																	  */
 
 	if (frames && !(frames % S805_DMA_MAX_DESC))
-		desc_tbl->table->control |= S805_DTBL_IRQ;
+		desc_tbl->table->control |= S805_DTBL_IRQ;                    /* 
+																		 This bit will be set for every S805_DMA_MAX_DESC = 128 data chunks. Since the pool will allocate, in first instance, a whole page to deliver our 
+																		 32 Bytes blocks if more than PAGE_SIZE / 32 = 128 blocks are allocated for a transaction and the new page allocated by the pool is not contiguous 
+																		 with the latter one descriptors won't be contiguous in memory, hence the hardware won't be able to fetch the descriptor 129 letting the transaction 
+																		 unfinished. So we force an interrupt every S805_DMA_MAX_DESC to reallocate the adresses in the hardware registers every time the page where the 
+																		 descriptors reside attempts to change.
+																		 
+																	  */
 		
 	return desc_tbl;
 	
