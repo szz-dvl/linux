@@ -35,8 +35,8 @@
 
 /* Registers & Bitmaps for the s805 DMAC */
 
-#define S805_DMA_MAX_DESC                256
-#define S805_DMA_THREAD_ID               0
+#define S805_DMA_MAX_DESC                128
+#define S805_DMA_MAX_THREAD              4
 #define S805_DMA_NULL_COOKIE             0
 #define S805_DMA_MAX_BURST               0xFFFF
 #define S805_DMA_MAX_SKIP                0xFFFF
@@ -100,10 +100,12 @@ struct s805_dmadev
 	spinlock_t lock;                  /* General mgr lock. */
 	int irq_number;                   /* IRQ number. */
     uint chan_available;              /* Amount of channels available. */
-	
-    struct list_head dlist;           /* List of descriptors currently scheduled. */
-	struct s805_desc *desc;           /* Actual descriptor being processed. */
-	
+
+	struct list_head scheduled;       /* List of descriptors currently scheduled. */
+	struct list_head in_progress;     /* List of descriptors in progress. */
+	struct list_head completed;       /* List of descriptors completed. */
+
+	bool busy;	
 };
 
 /* S805 Datasheet p.57 */
@@ -253,18 +255,7 @@ static s805_dtable * def_init_new_tdesc (struct s805_chan * c, unsigned int fram
 	
 	if (!desc_tbl) 
 	    return NULL;
-
-	/* 
-	   There is here a remote possibility of malfunction. Since the pool will allocate, in first instance, a whole page to deliver our 32 Bytes blocks
-	   if more than PAGE_SIZE / 32 = 128 blocks are allocated for a transaction and the pages allocated by the pool are not contiguous the descriptors 
-	   won't be contiguous in memory, hence the hardware won't be able to fetch the descriptor 129 letting the transaction unfinished. This can be simply
-	   overcomed by setting the value of S805_DMA_MAX_DESC to 128, so big transactions (of more than 128 data chunks) will interrupt us every time the 
-	   page where the descriptor is located attempt to change, independently of the hardware limitation of 256 descriptors. 
-
-	   In the final version of the driver this will probably be as exposed above, it is, with S805_DMA_MAX_DESC evaluating to 127, preserved this way for 
-	   testing purposes.
-	   
-	*/
+	
 	desc_tbl->table = dma_pool_alloc(c->pool, GFP_NOWAIT | __GFP_ZERO, &desc_tbl->paddr); /* __GFP_ZERO: Not Working. */
 	
 	if (!desc_tbl->table) {
@@ -1480,7 +1471,7 @@ s805_dma_prep_interrupt (struct dma_chan *chan,
 
 
 	/* 
-	   I don't know exactly what is expected for this capabilitie, with this implementation a 
+	   I don't know exactly what is expected for this capability, with this implementation a 
 	   new descriptor will be allocated and when the associated descriptor happens to be issued 
 	   this cookie will be marked as completed, hence the associated callback (defined by the user)
 	   will be called. So if the "dma_async_tx_descriptor" returned from this function belongs to a 
@@ -1537,7 +1528,7 @@ static void s805_dma_desc_free(struct virt_dma_desc *vd)
   
  */
 
-static inline void s805_dma_enable_hw (void) { 
+static inline void s805_dma_enable_hw ( void ) { 
 	
 	u32 status = RD(S805_DMA_CLK);
 	WR(status | S805_DMA_ENABLE, S805_DMA_CLK);
@@ -1547,15 +1538,12 @@ static inline void s805_dma_enable_hw (void) {
 	
 }
 
-static inline void s805_dma_thread_disable ( void ) { 
+static inline void s805_dma_thread_disable ( uint thread_id ) { 
    	
 	u32 reg_val;
-
-	WR(0x0000000, S805_DMA_DLST_STR0);
-	WR(0x0000000, S805_DMA_DLST_END0);
 	
 	reg_val = RD(S805_DMA_THREAD_CTRL);
-	WR(reg_val & ~S805_DMA_THREAD_ENABLE(S805_DMA_THREAD_ID), S805_DMA_THREAD_CTRL);
+	WR(reg_val & ~S805_DMA_THREAD_ENABLE(thread_id), S805_DMA_THREAD_CTRL);
 	
 }
 
@@ -1568,33 +1556,46 @@ static inline void s805_dma_thread_disable ( void ) {
   
 */
 
-static dma_addr_t s805_dma_allocate_tr (dma_addr_t addr, uint frames) 
+static dma_addr_t s805_dma_allocate_tr (uint thread_id, dma_addr_t addr, uint frames) 
 {
-
-	//mutex_lock(&mgr->lock);
 	
     u32 status;
 	u32 str_addr, end_addr;
-
+	
 	uint amount = min(frames, (uint) S805_DMA_MAX_DESC); 
-	//pr_info("Allocating transaction for thread (%d) >> ADDR: 0x%08x\n", thread_id, addr);
-
-	s805_dma_thread_disable();
+	
+	s805_dma_thread_disable(thread_id);
 
 	str_addr = addr;
 	end_addr = addr + (amount * sizeof(struct s805_table_desc_entry));
 
-	WR(str_addr, S805_DMA_DLST_STR0);
-	WR(end_addr, S805_DMA_DLST_END0);
+	switch(thread_id) {
+	case 0:
+		WR(str_addr, S805_DMA_DLST_STR0);
+		WR(end_addr, S805_DMA_DLST_END0);
+		break;
+	case 1:
+		WR(str_addr, S805_DMA_DLST_STR1);
+		WR(end_addr, S805_DMA_DLST_END1);
+		break;
+	case 2:
+		WR(str_addr, S805_DMA_DLST_STR2);
+		WR(end_addr, S805_DMA_DLST_END2);
+		break;
+	case 3:
+		WR(str_addr, S805_DMA_DLST_STR3);
+		WR(end_addr, S805_DMA_DLST_END3);
+		break;
+	}
 	
 	/* Pulse thread init to register table positions (token from crypto module) */
 	status = RD(S805_DMA_THREAD_CTRL);
-	WR(status | S805_DMA_THREAD_INIT(S805_DMA_THREAD_ID), S805_DMA_THREAD_CTRL);
+	WR(status | S805_DMA_THREAD_INIT(thread_id), S805_DMA_THREAD_CTRL);
 	
 	/* Reset count register (for this thread) and write count value for the descriptor list */
-	WR(S805_DMA_ADD_DESC(S805_DMA_THREAD_ID, 0x00), S805_DTBL_ADD_DESC);
-	WR(S805_DMA_ADD_DESC(S805_DMA_THREAD_ID, amount), S805_DTBL_ADD_DESC);
-
+	WR(S805_DMA_ADD_DESC(thread_id, 0x00), S805_DTBL_ADD_DESC);
+	WR(S805_DMA_ADD_DESC(thread_id, amount), S805_DTBL_ADD_DESC);
+	
 	return amount < frames ? (end_addr + sizeof(struct s805_table_desc_entry)) : 0;
 }
 
@@ -1604,19 +1605,18 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 	struct virt_dma_desc *vd, *tmp;
 	struct s805_desc * d;
 #ifdef DEBUG
-	s805_dtable *desc, *temp;
+	s805_dtable *desc;
 #endif
-	
-	spin_lock(&mgr->lock);
-	
+
 	list_for_each_entry_safe (vd, tmp, &c->vc.desc_issued, node) {
 
 		d = to_s805_dma_desc(&vd->tx);
-
+		
 #ifdef DEBUG
 
-		list_for_each_entry_safe (desc, temp, &d->desc_list, elem) {
+		list_for_each_entry (desc, &d->desc_list, elem) {
 
+			/* Last descriptors will be zeroed */
 			if (!list_is_last(&desc->elem, &d->desc_list)) {
 
 				dev_dbg(d->c->vc.chan.device->dev, "Descriptor (0x%08X) >> ctrl = 0x%08X, src = 0x%08X, dst = 0x%08X, byte_cnt = %u, src_burst = %u, src_skip = %u, dst_burst = %u, dst_skip = %u\n",
@@ -1632,6 +1632,7 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 			}
 		}
 #endif
+		
 		if (list_empty(&d->desc_list)) {
 			
 			/* 
@@ -1642,66 +1643,68 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 			vchan_cookie_complete(&d->vd);
 			continue;
 		}
-		
-		list_add_tail(&d->elem, &mgr->dlist);
 
+		spin_lock(&mgr->lock);
+		list_add_tail(&d->elem, &mgr->scheduled);
+		spin_unlock(&mgr->lock);
+		
 		if (!d->cyclic)
 			list_del(&vd->node);
 
 	}
-	
-	spin_unlock(&mgr->lock);
 }
 
 /* Start the given thread */
-static inline void s805_dma_thread_enable ( void ) { 
+static inline void s805_dma_thread_enable ( uint thread_id ) { 
    	
 	u32 reg_val;
 	
     reg_val = RD(S805_DMA_THREAD_CTRL);
-	WR(reg_val | S805_DMA_THREAD_ENABLE(S805_DMA_THREAD_ID), S805_DMA_THREAD_CTRL);
+	WR(reg_val | S805_DMA_THREAD_ENABLE(thread_id), S805_DMA_THREAD_CTRL);
 	
 }
 
-/* Fetch a new previously scheduled transaction. */
-static void s805_dma_fetch_tr ( void ) {
-	
-	spin_lock(&mgr->lock);
-	
-    mgr->desc = list_first_entry_or_null(&mgr->dlist, struct s805_desc, elem);
-	
-	while (mgr->desc) {
+/* Fetch a new previously scheduled transaction. (Protected by mgr->lock)*/
+static void s805_dma_fetch_tr ( uint ini_thread ) {
 
-		if (mgr->desc->c->status != DMA_PAUSED)
-			break;
-		else {
+	uint thread;
+	struct s805_desc * d;
+	
+	for (thread = ini_thread; thread < S805_DMA_MAX_THREAD; thread ++) {
+		
+		
+		d = list_first_entry_or_null(&mgr->scheduled, struct s805_desc, elem);
+	
+		while (d) {
+
+			if (d->c->status != DMA_PAUSED)
+				break;
+			else {
+				
+				if (list_is_last(&d->elem, &mgr->scheduled))
+				    d = NULL;
+				else
+					d = list_next_entry(d, elem);
+			}			
+		}
+		
+		if (d) {
 			
-			if (list_is_last(&mgr->desc->elem, &mgr->dlist))
-			    mgr->desc = NULL;
-			else
-				mgr->desc = list_next_entry(mgr->desc, elem);
-		}			
+			d->next = s805_dma_allocate_tr (thread,
+											d->next ? d->next : list_first_entry(&d->desc_list,
+																				 s805_dtable,
+																				 elem)->paddr,
+											d->frames);
+			
+		    d->c->status = DMA_IN_PROGRESS;
+			
+			list_move_tail(&d->elem, &mgr->in_progress);
+			
+			s805_dma_thread_enable(thread);
+			
+		    mgr->busy = true;
+		} 
 	}
-
-	spin_unlock(&mgr->lock);
-	
-	if (mgr->desc) {
-		
-		mgr->desc->next = s805_dma_allocate_tr (list_first_entry(&mgr->desc->desc_list,
-																 s805_dtable,
-																 elem)->paddr,
-												
-												mgr->desc->frames);
-		
-		mgr->desc->c->status = DMA_IN_PROGRESS;
-
-		list_del(&mgr->desc->elem);
-
-		s805_dma_thread_enable();
-	}
-	
-	
-	
 }
 
 /* 
@@ -1730,12 +1733,90 @@ static enum dma_status s805_dma_process_next_desc ( struct s805_chan *c )
 	   to a non paused channel.
 	  			   
 	*/
-		
-	if (!mgr->desc)
-		s805_dma_fetch_tr();
+
+	spin_lock(&mgr->lock);
+	if (!mgr->busy) 
+		s805_dma_fetch_tr(0);
+	
+	spin_unlock(&mgr->lock);
 	
 	return c->status;
 }
+
+/* Process completed descriptors */
+static void s805_dma_process_completed ( void )
+{
+	struct s805_desc * d, * temp;
+	uint thread = 0;
+
+	list_for_each_entry_safe (d, temp, &mgr->completed, elem) {
+		
+		/* All the transactions has been completed, process the finished descriptors.*/
+		
+		if (!d->next) {
+
+			if (d->cyclic) {
+				
+				dev_dbg(d->c->vc.chan.device->dev, "Cookie %d completed, calling cyclic callback.\n", d->vd.tx.cookie);
+				vchan_cyclic_callback(&d->vd);
+
+				spin_lock(&mgr->lock);
+				list_move_tail(&d->elem, &mgr->scheduled);
+				spin_unlock(&mgr->lock);
+				
+			} else { 
+				
+				dev_dbg(d->c->vc.chan.device->dev, "Marking cookie %d completed.\n", d->vd.tx.cookie);
+
+				list_del(&d->elem);
+				
+				spin_lock(&d->c->vc.lock);
+				
+				d->c->status = DMA_SUCCESS;
+				vchan_cookie_complete(&d->vd);
+				
+				spin_unlock(&d->c->vc.lock);
+				
+			}
+				
+		} else {
+				
+			/* 
+			   If we reach this code the scheduled descriptor have more than S805_DMA_MAX_DESC data chunks, 
+			   so we need to restart the transaction from the last descriptor processed. 
+			*/
+			
+			d->frames -= S805_DMA_MAX_DESC;
+			
+			dev_dbg(d->c->vc.chan.device->dev, "Re-scheduling cookie %d, frames left: %u.\n", d->vd.tx.cookie, d->frames);
+			
+			if (d->c->status != DMA_PAUSED) {
+				
+				d->next = s805_dma_allocate_tr (thread, d->next, d->frames);
+				
+				spin_lock(&mgr->lock);
+				list_move_tail(&d->elem, &mgr->in_progress);
+				spin_unlock(&mgr->lock);
+				
+				s805_dma_thread_enable(thread);
+				thread ++;
+				
+			} else {
+				
+				spin_lock(&mgr->lock);
+				list_move_tail(&d->elem, &mgr->scheduled);
+				spin_unlock(&mgr->lock);
+			}
+		}
+	}
+	
+	spin_lock(&mgr->lock);
+	if (!mgr->busy) 
+		s805_dma_fetch_tr(thread);
+	
+	spin_unlock(&mgr->lock);
+}
+
 
 /* 
    
@@ -1747,70 +1828,23 @@ static enum dma_status s805_dma_process_next_desc ( struct s805_chan *c )
 
 static irqreturn_t s805_dma_callback (int irq, void *data)
 {
+
 	struct s805_dmadev * m = (struct s805_dmadev *) data;
-	struct s805_desc * d = m->desc;
 	
-	if (d) {
+	list_move_tail (&list_first_entry(&m->in_progress,
+									  s805_dtable,
+									  elem)->elem,
+					&m->completed);
+	
+	if (list_empty(&m->in_progress)) {
 		
-		if (!d->terminated) {
-			
-			pr_info("s805_dma_callback: Processing descriptor: frames => %u\n", d->frames);
-			
-			/* All the transaction has been processed, fetch a new descriptor.*/
-			
-			if (!d->next) {
-
-				if (d->cyclic) {
-
-					/*
-					  
-					  For channels running cyclic transactions we assume that only one descriptor will be submitted. 
-					  I guess this is the expected behaviour, correct if not please! 
-					  
-					*/
-
-					dev_dbg(d->c->vc.chan.device->dev, "Cookie %d completed, calling cyclic callback.\n", d->vd.tx.cookie);
-					vchan_cyclic_callback(&d->vd);
-					
-					s805_dma_schedule_tr(d->c);
-					
-				} else { 
-				
-					dev_dbg(d->c->vc.chan.device->dev, "Marking cookie %d completed.\n", d->vd.tx.cookie);
-					
-					spin_lock(&d->c->vc.lock);
-					
-					d->c->status = DMA_SUCCESS;
-					vchan_cookie_complete(&d->vd);
-					
-					spin_unlock(&d->c->vc.lock);
-				    
-				}
-				
-				s805_dma_fetch_tr();
-				
-			} else {
-				
-				/* 
-				   If we reach this code the scheduled descriptor have more than S805_DMA_MAX_DESC data chunks, 
-				   so we need to restart the transaction from the last descriptor processed. 
-				*/
-
-				d->frames -= S805_DMA_MAX_DESC;
-				
-				d->next = s805_dma_allocate_tr (d->next, d->frames);
-				s805_dma_thread_enable();
-			}
-			
-		} else {
-			
-			pr_info("s805_dma_callback: Terminated descriptor.\n");
-			s805_dma_desc_free(&d->vd);
-		    s805_dma_fetch_tr();
-		}
+		spin_lock(&m->lock);
+		m->busy = false;
+		spin_unlock(&m->lock);
 		
-	} else
-		pr_info("s805_dma_callback: NO descriptor.\n");
+		s805_dma_process_completed();	
+		
+	}
 	
 	return IRQ_HANDLED;
 }
@@ -1820,7 +1854,7 @@ static void s805_dma_dismiss_chann ( struct s805_chan * c ) {
 
 	struct s805_desc * d, * tmp;
 	
-	list_for_each_entry_safe (d, tmp, &mgr->dlist, elem) {
+	list_for_each_entry_safe (d, tmp, &mgr->scheduled, elem) {
 
 		if ( d->c == c )  {
 			
@@ -1828,6 +1862,8 @@ static void s805_dma_dismiss_chann ( struct s805_chan * c ) {
 			list_del(&d->elem);
 		}
 	}
+
+	/* Transactions in progress will finish, how is the proper way to treat this? */
 }
 
 /*
@@ -1849,30 +1885,23 @@ static int s805_dma_control (struct dma_chan *chan,
 	switch (cmd) {
 	case DMA_TERMINATE_ALL:
 		{
-			/* If the transaction in course belongs to our channel, dismiss it. */
-			if (mgr->desc && mgr->desc->c == c) 
-				mgr->desc->terminated = true;
-			
 			/* Pause the channel to stop any transaction in course */
 			spin_lock(&c->vc.lock);
 
 			c->status = DMA_PAUSED;
 			
-			list_splice_tail_init(&c->vc.desc_submitted, &head);
-			list_splice_tail_init(&c->vc.desc_issued, &head);
+			vchan_dma_desc_free_list(&c->vc, &c->vc.desc_submitted);
 			
 			spin_unlock(&c->vc.lock);
 		   	
 			/* Dismiss all pending operations */
 			spin_lock(&mgr->lock);
-
 			s805_dma_dismiss_chann(c);
-						
 			spin_unlock(&mgr->lock);
 			
-			vchan_dma_desc_free_list(&c->vc, &head);
-			
+			spin_lock(&c->vc.lock);
 			c->status = DMA_SUCCESS;
+			spin_lock(&c->vc.lock);
 		}
 		break;;
 		
@@ -1901,8 +1930,15 @@ static int s805_dma_control (struct dma_chan *chan,
 				
 				if (vchan_issue_pending(&c->vc)) 
 					s805_dma_process_next_desc(c);
-				else if (!mgr->desc)
-					s805_dma_fetch_tr();
+
+				else {
+					
+					spin_lock(&mgr->lock);
+					if (!mgr->busy) 
+						s805_dma_fetch_tr(0);
+					
+					spin_unlock(&mgr->lock);
+				}
 				
 				spin_unlock(&c->vc.lock);
 			}
@@ -1972,7 +2008,7 @@ enum dma_status s805_dma_tx_status(struct dma_chan *chan,
 		return ret;
 
 	/* Underprotected: to be tested! */
-	list_for_each_entry_safe (d, temp, &mgr->dlist, elem) {
+	list_for_each_entry_safe (d, temp, &mgr->scheduled, elem) {
 		
 		if (d->vd.tx.cookie == cookie) {
 			
@@ -2073,7 +2109,10 @@ static int s805_dmamgr_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	
     spin_lock_init(&mgr->lock);
-	INIT_LIST_HEAD(&mgr->dlist);
+	
+	INIT_LIST_HEAD(&mgr->scheduled);
+	INIT_LIST_HEAD(&mgr->in_progress);
+	INIT_LIST_HEAD(&mgr->completed);
 	
 	dev_info(&pdev->dev, "DMA legacy API manager at 0x%p\n", mgr);
 	
@@ -2201,7 +2240,7 @@ static int s805_dma_probe (struct platform_device *pdev)
 	
 	platform_set_drvdata(pdev, sd);
 	
-	pr_info("Entering s805 DMA engine probe, chan available: %u, IRQ: %u\n", mgr->chan_available, S805_DMA_IRQ);
+    dev_info(&pdev->dev, "Entering s805 DMA engine probe, chan available: %u, IRQ: %u\n", mgr->chan_available, S805_DMA_IRQ);
 	
 	for (i = 0; i < mgr->chan_available; i++) {
 		
@@ -2221,7 +2260,7 @@ static int s805_dma_probe (struct platform_device *pdev)
 	}
 	
 	s805_dma_enable_hw();
-	dev_dbg(&pdev->dev, "Loaded S805 DMAC driver\n");
+	dev_info(&pdev->dev, "Loaded S805 DMAC driver\n");
 	
 	return 0;
 	
