@@ -174,7 +174,7 @@ typedef struct s805_chan {
 	
 	struct virt_dma_chan vc;
 
-	 /* Channel configuration, needed for slave_sg and cyclic transfers. */
+	/* Channel configuration, needed for slave_sg and cyclic transfers. */
 	struct dma_slave_config cfg;
 
 	/* Status of the channel either DMA_PAUSE or DMA_IN_PROGRESS, DMA_SUCCESS if inactive channel. */
@@ -271,19 +271,20 @@ static s805_dtable * def_init_new_tdesc (struct s805_chan * c, unsigned int fram
 	desc_tbl->table->control |= S805_DTBL_INLINE_TYPE(INLINE_NORMAL); /* To Do: Add support for crypto types */
 
 	/* desc_tbl->table->control |= S805_DTBL_NO_BREAK;                   
-																		 Process the whole descriptor at once, without thread switching 
+	   
+	   Process the whole descriptor at once, without thread switching 
 																		 
-																		 This needs to be tested with this approach, if this bit is set the threads will be processed at once, 
-																		 without thread switching, what will make that the interrupts to be delivered more separated in time, however
-																		 if this bit is not set the work of the active threads will be, in some manner, balanced so if we see the
-																		 the 4 threads, with its possible active transactions, as a batch of transactions (what is actually what this
-																		 implementation tries) to not set this bit may be a benefit, specially if "in_progress" transactions differ
-																		 in size. In the other hand if "in_progress" transactions are similar in size interrupts may be delivered very
-																		 close in time, hence "nestedly preempted", what may cause malfunction.
+	   This needs to be tested with this approach, if this bit is set the threads will be processed at once, 
+	   without thread switching, what will make that the interrupts to be delivered more separated in time, however
+	   if this bit is not set the work of the active threads will be, in some manner, balanced so if we see the
+	   the 4 threads, with its possible active transactions, as a batch of transactions (what is actually what this
+	   implementation tries) to not set this bit may be a benefit, specially if "in_progress" transactions differ
+	   in size. In the other hand if "in_progress" transactions are similar in size interrupts may be delivered very
+	   close in time, hence "nestedly preempted", what may cause malfunction.
 																		 
-																		 As exposed above, to be tested. 
+	   As exposed above, to be tested. 
 																		 
-																	  */
+	*/
 
 	if (frames && !(frames % S805_DMA_MAX_DESC))
 		desc_tbl->table->control |= S805_DTBL_IRQ;                    /* 
@@ -306,7 +307,7 @@ static s805_dtable * def_init_new_tdesc (struct s805_chan * c, unsigned int fram
    
    * Add support for crypto inline types;
    
-*/
+   */
 
 static struct dma_async_tx_descriptor * 
 s805_dma_prep_slave_sg( struct dma_chan *chan,
@@ -1212,9 +1213,9 @@ s805_dma_prep_sg (struct dma_chan *chan,
 					if (icg > 0 && icg <= S805_DMA_MAX_SKIP && icg == next_icg) {
 						
 							
-							desc_tbl->table->src_burst = desc_tbl->table->count; 
-							desc_tbl->table->src_skip = icg;
-							new_block = false;	
+						desc_tbl->table->src_burst = desc_tbl->table->count; 
+						desc_tbl->table->src_skip = icg;
+						new_block = false;	
 						
 					}
 				}
@@ -1420,7 +1421,7 @@ s805_dma_prep_memset (struct dma_chan *chan,
 
 	  To be tested!
 	  
-	 */
+	*/
 	
 	*d->memset->value <<= (sizeof(int) * 8);
     *d->memset->value |= (value & LOWER_32);
@@ -1547,7 +1548,7 @@ static void s805_dma_desc_free(struct virt_dma_desc *vd)
   
   Write general CLK register to enable engine  
   
- */
+*/
 
 static inline void s805_dma_enable_hw ( void ) { 
 	
@@ -1664,20 +1665,18 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 			vchan_cookie_complete(&d->vd);
 			continue;
 		}
-
+		
 		spin_lock(&mgr->lock);
 		list_add_tail(&d->elem, &mgr->scheduled);
 		spin_unlock(&mgr->lock);
 		
-		if (!d->cyclic)
-			list_del(&vd->node);
-
+		list_del(&vd->node);	
 	}
 }
 
 /* Start the given thread */
 static inline void s805_dma_thread_enable ( uint thread_id ) { 
-   	
+	
 	u32 reg_val;
 	
     reg_val = RD(S805_DMA_THREAD_CTRL);
@@ -1687,17 +1686,16 @@ static inline void s805_dma_thread_enable ( uint thread_id ) {
 
 /* Fetch a new previously scheduled transaction. (Protected by mgr->lock)*/
 static void s805_dma_fetch_tr ( uint ini_thread ) {
-
+	
 	uint thread;
 	struct s805_desc * d;
 	
 	for (thread = ini_thread; thread < S805_DMA_MAX_THREAD; thread ++) {
 		
-		
 		d = list_first_entry_or_null(&mgr->scheduled, struct s805_desc, elem);
-	
+		
 		while (d) {
-
+			
 			if (d->c->status != DMA_PAUSED)
 				break;
 			else {
@@ -1710,7 +1708,7 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 		}
 		
 		if (d) {
-
+			
 			list_move_tail(&d->elem, &mgr->in_progress);
 			
 			d->next = s805_dma_allocate_tr (thread,
@@ -1736,7 +1734,7 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
    
    @c: s805_chan to check for pending descriptors
    
- */
+*/
 static enum dma_status s805_dma_process_next_desc ( struct s805_chan *c )
 {
 
@@ -1750,8 +1748,8 @@ static enum dma_status s805_dma_process_next_desc ( struct s805_chan *c )
 	/* 
 	   We may face two different situations here: 
 		   
-	      *  Either the first descriptors in the thread queues are the once we just allocated ...
-	      *  Or there are paused descriptors in the head of the queues.
+	   *  Either the first descriptors in the thread queues are the once we just allocated ...
+	   *  Or there are paused descriptors in the head of the queues.
 				  
 	   In both cases "s805_dma_fetch_tr" will start the proper transaction, it is, the first belonging
 	   to a non paused channel.
@@ -1965,10 +1963,14 @@ static int s805_dma_control (struct dma_chan *chan,
 				spin_lock(&c->vc.lock);
 				c->status = DMA_SUCCESS;
 				
-				if (vchan_issue_pending(&c->vc)) 
-					s805_dma_process_next_desc(c);
+				if (vchan_issue_pending(&c->vc)) {
 
-				else {
+					s805_dma_process_next_desc(c);
+					spin_unlock(&c->vc.lock);
+					
+				} else {
+					
+					spin_unlock(&c->vc.lock);
 					
 					spin_lock(&mgr->lock);
 					if (!mgr->busy) 
@@ -1976,8 +1978,6 @@ static int s805_dma_control (struct dma_chan *chan,
 					
 					spin_unlock(&mgr->lock);
 				}
-				
-				spin_unlock(&c->vc.lock);
 			}
 		}
 	    break;;
@@ -2043,7 +2043,7 @@ enum dma_status s805_dma_tx_status(struct dma_chan *chan,
 	
 	if (ret == DMA_SUCCESS)
 		return ret;
-
+	
 	/* Underprotected: to be tested! */
 	list_for_each_entry_safe (d, temp, &mgr->scheduled, elem) {
 		
@@ -2311,38 +2311,38 @@ static int s805_dma_probe (struct platform_device *pdev)
 
 static int s805_dma_remove(struct platform_device *pdev)
 {
-   struct s805_dmadev *sd = platform_get_drvdata(pdev);
+	struct s805_dmadev *sd = platform_get_drvdata(pdev);
 
-   dma_async_device_unregister(&sd->ddev);
-   s805_dma_free(sd);
+	dma_async_device_unregister(&sd->ddev);
+	s805_dma_free(sd);
 
-   return 0;
+	return 0;
 }
 
 static struct platform_driver s805_dma_driver = {
-   .probe	= s805_dma_probe,
-   .remove	= s805_dma_remove,
-   .driver = {
-	   .name = "s805-dmaengine",
-	   .owner = THIS_MODULE,
-	   .of_match_table = of_match_ptr(s805_dma_of_match),
-   },
+	.probe	= s805_dma_probe,
+	.remove	= s805_dma_remove,
+	.driver = {
+		.name = "s805-dmaengine",
+		.owner = THIS_MODULE,
+		.of_match_table = of_match_ptr(s805_dma_of_match),
+	},
 };
 
 static int s805_init(void)
 {
-   return platform_driver_register(&s805_dma_driver);
+	return platform_driver_register(&s805_dma_driver);
 }
 
 static void s805_exit(void)
 {
-   platform_driver_unregister(&s805_dma_driver);
+	platform_driver_unregister(&s805_dma_driver);
 }
 
 /*
-* Load after serial driver (arch_initcall) so we see the messages if it fails,
-* but before drivers (module_init) that need a DMA channel.
-*/
+ * Load after serial driver (arch_initcall) so we see the messages if it fails,
+ * but before drivers (module_init) that need a DMA channel.
+ */
 
 subsys_initcall(s805_init);
 module_exit(s805_exit);
