@@ -303,12 +303,18 @@ static s805_dtable * def_init_new_tdesc (struct s805_chan * c, unsigned int fram
 static inline void fwd_sg (struct sg_info * info) {
 
 	if (info->cursor) {
-
-		info->cursor = info->next;
-		info->next = sg_next(info->cursor);
-		info->bytes = 0;
 		
+		if (info->next) {
+
+			info->cursor = info->next;
+			info->next = sg_next(info->cursor);
+		
+		} else
+			info->cursor = NULL;
 	}
+	
+	info->bytes = 0;
+			
 }
 
 static int get_sg_icg (struct sg_info * info) {
@@ -319,7 +325,7 @@ static int get_sg_icg (struct sg_info * info) {
 	*/
 
 	if (info->next)
-		return sg_dma_address(info->next) - sg_dma_address(info->cursor);
+		return sg_dma_address(info->next) - (sg_dma_address(info->cursor) + sg_dma_len(info->cursor));
 	else
 		return -1;
 }
@@ -329,40 +335,28 @@ static uint get_sg_remain (struct sg_info * info) {
 	if (info->cursor)
 		return sg_dma_len(info->cursor) - info->bytes;
 	else
-		return UINT_MAX;
-}
-
-static bool sg_got_cursor (struct sg_info * info) {
-
-	return info->cursor;
-
-}
-
-/* Not needed for this approach, preserved until test. */
-static s805_dtable * get_next_chunk (s805_dtable * curr, struct s805_desc *d) {
-
-	if (list_is_last(&curr->elem, &d->desc_list))
-		return NULL;
-	else
-		return list_next_entry(curr, elem);
+		return UINT_MAX; /* For convenience in dma_sg */
 }
 
 static s805_dtable * move_along (s805_dtable * cursor, struct s805_desc *d) {
 
-	s805_dtable * aux = get_next_chunk(cursor, d);
+	/* dev_dbg(d->c->vc.chan.device->dev, "Descriptor %03u (0x%08X) >> ctrl = 0x%08X, src = 0x%08X, dst = 0x%08X, byte_cnt = %u, src_burst = %u, src_skip = %u, dst_burst = %u, dst_skip = %u\n", */
+	/* 		d->frames, */
+	/* 		cursor->paddr, */
+	/* 		cursor->table->control,  */
+	/* 		cursor->table->src,  */
+	/* 		cursor->table->dst,  */
+	/* 		cursor->table->count, */
+	/* 		cursor->table->src_burst, */
+	/* 		cursor->table->src_skip, */
+	/* 		cursor->table->dst_burst, */
+	/* 		cursor->table->dst_skip); */
 	
-	if (!aux) {
-
-		/* Log debug here. */
-		
-		list_add_tail(&cursor->elem, &d->desc_list);
-		d->frames ++;
-		
-		return def_init_new_tdesc(d->c, d->frames);
-
-	} else
-		return aux;
-
+	list_add_tail(&cursor->elem, &d->desc_list);
+	d->frames ++;
+	
+	return def_init_new_tdesc(d->c, d->frames);
+	
 }
 
 static bool sg_ent_complete (struct sg_info * info) {
@@ -396,9 +390,13 @@ s805_dma_prep_slave_sg( struct dma_chan *chan,
 	enum dma_slave_buswidth dev_width;
 	struct s805_desc *d;
 	dma_addr_t dev_addr;
-	struct scatterlist *sgent;
-	unsigned int i, j;
+	struct sg_info info;
 	s805_dtable * desc_tbl, * temp;
+	uint size, act_size;
+	int icg, next_icg, next_burst;
+	dma_addr_t addr;
+	u16 * my_burst, * my_skip;
+	bool new_block;
 	
 	/*
 	  
@@ -482,19 +480,162 @@ s805_dma_prep_slave_sg( struct dma_chan *chan,
 	 * S805_MAX_TR_SIZE (~33.5MB) per block.
 	 *
 	 */
-    
-	for_each_sg(sgl, sgent, sg_len, i) {
+	
+	info.cursor = sgl;
+	info.next = sg_next(info.cursor);
+	info.bytes = 0;
+	
+	desc_tbl = def_init_new_tdesc(c, d->frames);
 
-		/* Optimize to reduce used descriptors: Hint reuse DMA_SG aux funcs / structs*/
+	addr = sg_dma_address(info.cursor);
+
+	switch(direction) {
+	case DMA_DEV_TO_MEM:
+		{
+			desc_tbl->table->control |= S805_DTBL_SRC_HOLD;
+			desc_tbl->table->src = dev_addr;
+			desc_tbl->table->dst = addr;
+		}
+		break;;
 		
-		dma_addr_t addr = sg_dma_address(sgent); /* is the offset taken into account here? */
-		unsigned int len = sg_dma_len(sgent);
+	case DMA_MEM_TO_DEV:
+		{
+			desc_tbl->table->control |= S805_DTBL_DST_HOLD;
+			desc_tbl->table->src = addr;
+			desc_tbl->table->dst = dev_addr;
+		}
+		break;;    
 		
-		for (j = 0; j < len; j += S805_MAX_TR_SIZE) {
+	case DMA_DEV_TO_DEV:
+		{
+			desc_tbl->table->control |= (S805_DTBL_SRC_HOLD | S805_DTBL_DST_HOLD);
+			desc_tbl->table->src = c->cfg.src_addr;
+			desc_tbl->table->dst = c->cfg.dst_addr;
+		}
+		break;;
+					
+	default:
+		goto error_list;
+		
+	}
+	
+	while (info.cursor) {
+
+	    size = get_sg_remain(&info);
+		
+	    while (size > 0) {
 			
-			s805_dtable *desc_tbl = def_init_new_tdesc(c, d->frames);
+			act_size = size < S805_MAX_TR_SIZE ? size : S805_MAX_TR_SIZE;
+			
+			if ((desc_tbl->table->count + act_size) > S805_MAX_TR_SIZE) {
 
-			if (!desc_tbl) 
+				desc_tbl = move_along(desc_tbl, d);
+					
+				if (!desc_tbl)
+					goto error_list;
+
+				/* Setup addresses */
+				switch(direction) {
+				case DMA_DEV_TO_MEM:
+					{
+						desc_tbl->table->control |= S805_DTBL_SRC_HOLD;
+						desc_tbl->table->src = dev_addr;
+						desc_tbl->table->dst = addr + (dma_addr_t) info.bytes;
+					}
+					break;;
+				
+				case DMA_MEM_TO_DEV:
+					{
+						desc_tbl->table->control |= S805_DTBL_DST_HOLD;
+						desc_tbl->table->src = addr + (dma_addr_t) info.bytes;
+						desc_tbl->table->dst = dev_addr;
+					}
+					break;;    
+					
+				case DMA_DEV_TO_DEV:
+					{
+						desc_tbl->table->control |= (S805_DTBL_SRC_HOLD | S805_DTBL_DST_HOLD);
+						desc_tbl->table->src = c->cfg.src_addr;
+						desc_tbl->table->dst = c->cfg.dst_addr;
+					}
+					break;;
+					
+				default:
+					goto error_list;
+					
+				}		
+			}
+			
+		    desc_tbl->table->count += act_size;
+			info.bytes += act_size;
+			
+		    size -= act_size;
+		}
+		
+		/* Completed sg entry here. */
+		
+		new_block = true;
+		
+		if (direction != DMA_DEV_TO_DEV) {
+			
+			switch(direction) {
+			case DMA_DEV_TO_MEM:
+				{
+					my_burst = &desc_tbl->table->dst_burst;
+					my_skip = &desc_tbl->table->dst_skip;
+				}
+				break;;
+				
+			case DMA_MEM_TO_DEV:
+				{
+					my_burst = &desc_tbl->table->src_burst;
+					my_skip = &desc_tbl->table->src_skip;
+				}
+				break;;    
+
+			default:
+				goto error_list;
+
+			}
+
+			
+			icg = get_sg_icg(&info);
+			next_burst = info.next ? sg_dma_len(info.next) : -1;
+			fwd_sg(&info);
+			next_icg = get_sg_icg(&info);
+
+			//pr_info("ICG = %d, NEXT_ICG = %d, NEXT_BURST = %d, my_burst =  %u, my_skip = %u, count = %u\n", icg, next_icg, next_burst, *my_burst, *my_skip, desc_tbl->table->count);
+			
+			if (*my_burst == 0) {
+
+				/* This check will ensure that the next block will fit in the src_burst size we will allocate right after this lines. */
+				if (next_burst == desc_tbl->table->count &&
+					desc_tbl->table->count <= S805_DMA_MAX_BURST) {
+					
+					if (icg >= 0 && icg <= S805_DMA_MAX_SKIP && icg == next_icg) {
+						
+						*my_burst = desc_tbl->table->count; 
+						*my_skip = icg;
+						new_block = false;	
+						
+					} 
+				}
+				
+			} else if (*my_burst == next_burst && (*my_skip == next_icg || !info.next)) 
+				new_block = false;
+			
+			addr = info.cursor ? sg_dma_address(info.cursor) : 0; /* Already forwarded. */
+			
+		} else
+			new_block = false; /* If a new block is needed will be allocated in the above loop for DMA_DEV_TO_DEV */
+
+		new_block = new_block && info.cursor;
+		
+		if (new_block) {
+
+			desc_tbl = move_along(desc_tbl, d);
+			
+			if (!desc_tbl)
 				goto error_list;
 			
 			/* Setup addresses */
@@ -503,46 +644,34 @@ s805_dma_prep_slave_sg( struct dma_chan *chan,
 				{
 					desc_tbl->table->control |= S805_DTBL_SRC_HOLD;
 					desc_tbl->table->src = dev_addr;
-					desc_tbl->table->dst = addr + (dma_addr_t)j;
+					desc_tbl->table->dst = addr;
 				}
 				break;;
 				
 			case DMA_MEM_TO_DEV:
 				{
 					desc_tbl->table->control |= S805_DTBL_DST_HOLD;
-					desc_tbl->table->src = addr + (dma_addr_t)j;
+					desc_tbl->table->src = addr;
 					desc_tbl->table->dst = dev_addr;
 				}
-				break;;    
-				
-			case DMA_DEV_TO_DEV:
-				{
-					/* Is that assumption fair? will the user have acces to devices memory? can I hold both dst and src addresses here? */
-					desc_tbl->table->control |= (S805_DTBL_SRC_HOLD | S805_DTBL_DST_HOLD);
-					desc_tbl->table->src = c->cfg.src_addr;
-					desc_tbl->table->dst = c->cfg.dst_addr;
-				}
 				break;;
-
-			default:
 				
-				dev_err(chan->device->dev, "This must never happen!");
-				return NULL;
+			default:
+				goto error_list;
 				
 			}
 			
-			/* Fill byte count for the block move */
-			desc_tbl->table->count = min((len - j) & S805_MAX_TR_SIZE, (uint) S805_MAX_TR_SIZE);
-			
-			list_add_tail(&desc_tbl->elem, &d->desc_list);
+		} else if (!info.cursor) {
 
+			list_add_tail(&desc_tbl->elem, &d->desc_list);
 			d->frames ++;
-		}
+			
+		}	
 	}
 
 	/* Ensure that the last descriptor will interrupt us. */
 	list_entry(d->desc_list.prev, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
-
+	
 	add_zeroed_tdesc(d);
 	
 	/* Assert cyclic false for this descriptor */
@@ -1074,9 +1203,9 @@ s805_dma_prep_sg (struct dma_chan *chan,
 	struct s805_desc *d;
 	struct sg_info src_info, dst_info;
 	s805_dtable * desc_tbl, * temp;
-	unsigned int j, src_len, dst_len, icg, next_icg, next_burst, bytes = 0;
+	unsigned int j, src_len, dst_len, bytes = 0;
 	dma_addr_t src_addr, dst_addr;
-	int min_size, act_size;
+	int min_size, act_size, icg, next_icg, next_burst;
 	bool new_block;
 	
 	//struct data_chunk last_dst, last_src;
@@ -1117,7 +1246,7 @@ s805_dma_prep_sg (struct dma_chan *chan,
 	dst_addr = sg_dma_address(dst_info.cursor);
 	
 	/* "Fwd logic" not optimal, first approach, must do. */
-	while (sg_got_cursor(&src_info) || sg_got_cursor(&dst_info)) {
+	while (src_info.cursor || dst_info.cursor) {
 		
 		src_len = get_sg_remain(&src_info);
 		dst_len = get_sg_remain(&dst_info);
@@ -1153,7 +1282,7 @@ s805_dma_prep_sg (struct dma_chan *chan,
 		if (sg_ent_complete(&src_info)) {
 
 			icg = get_sg_icg(&src_info);
-			next_burst = sg_dma_len(src_info.next);
+			next_burst = src_info.next ? sg_dma_len(src_info.next) : -1;
 			fwd_sg(&src_info);
 			next_icg = get_sg_icg(&src_info);
 				
@@ -1164,7 +1293,7 @@ s805_dma_prep_sg (struct dma_chan *chan,
 					desc_tbl->table->count <= S805_DMA_MAX_BURST) {
 					
 				   
-					if (icg > 0 && icg <= S805_DMA_MAX_SKIP && icg == next_icg) {
+					if (icg >= 0 && icg <= S805_DMA_MAX_SKIP && icg == next_icg) {
 								
 						desc_tbl->table->src_burst = desc_tbl->table->count; 
 						desc_tbl->table->src_skip = icg;
@@ -1172,15 +1301,17 @@ s805_dma_prep_sg (struct dma_chan *chan,
 						
 					}
 				}
-			}
+				
+			} else if (desc_tbl->table->src_burst == next_burst && (desc_tbl->table->src_skip == next_icg || !src_info.next)) 
+				new_block = false;
 			
-			src_addr = sg_dma_address(src_info.cursor);
+			src_addr = src_info.cursor ? sg_dma_address(src_info.cursor) : 0;
 		}
 			
 		if (sg_ent_complete(&dst_info)) {
 
 			icg = get_sg_icg(&dst_info);
-			next_burst = sg_dma_len(dst_info.next);
+			next_burst = dst_info.next ? sg_dma_len(dst_info.next) : -1;
 			fwd_sg(&dst_info);
 			next_icg = get_sg_icg(&dst_info);
 
@@ -1190,7 +1321,7 @@ s805_dma_prep_sg (struct dma_chan *chan,
 				if (next_burst == desc_tbl->table->count &&
 					desc_tbl->table->count <= S805_DMA_MAX_BURST) {
 				
-					if (icg > 0 && icg <= S805_DMA_MAX_SKIP && icg == next_icg) {
+					if (icg >= 0 && icg <= S805_DMA_MAX_SKIP && icg == next_icg) {
 						
 						desc_tbl->table->dst_burst = desc_tbl->table->count;
 						desc_tbl->table->dst_skip = icg;
@@ -1198,11 +1329,15 @@ s805_dma_prep_sg (struct dma_chan *chan,
 						
 					}
 				}
-			}
+				
+			} else if (desc_tbl->table->dst_burst == next_burst && (desc_tbl->table->dst_skip == next_icg || !dst_info.next)) 
+				new_block = false;
 
-			dst_addr = sg_dma_address(dst_info.cursor);
+			dst_addr = dst_info.cursor ? sg_dma_address(dst_info.cursor) : 0;
 		}
-					  
+
+		new_block = new_block && (dst_info.cursor || src_info.cursor);
+		
 		if (new_block) {
 			
 			desc_tbl = move_along(desc_tbl, d);
@@ -1212,12 +1347,17 @@ s805_dma_prep_sg (struct dma_chan *chan,
 			
 			desc_tbl->table->src = src_addr + (dma_addr_t)src_info.bytes;
 			desc_tbl->table->dst = dst_addr + (dma_addr_t)dst_info.bytes;
+
+		} else if (!dst_info.cursor && !src_info.cursor) {
+
+			list_add_tail(&desc_tbl->elem, &d->desc_list);
+			d->frames ++;	
 		}
 	}
 
 	/* Ensure that the last descriptor will interrupt us. */
 	list_entry(d->desc_list.prev, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
-
+	
 	add_zeroed_tdesc(d);
 	
 	/* Assert cyclic false for this descriptor */
@@ -1236,7 +1376,7 @@ s805_dma_prep_sg (struct dma_chan *chan,
 		kfree(desc_tbl);
 		
 	}
-
+	
 	kfree(d);
 	return NULL;
 }
