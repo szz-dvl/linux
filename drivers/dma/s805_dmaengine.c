@@ -35,7 +35,7 @@
 
 /* Registers & Bitmaps for the s805 DMAC */
 
-#define S805_DMA_MAX_DESC                128
+#define S805_DMA_MAX_DESC                127
 #define S805_DMA_MAX_THREAD              4
 #define S805_DMA_NULL_COOKIE             0
 #define S805_DMA_MAX_BURST               0xFFFF
@@ -166,7 +166,7 @@ struct s805_desc {
 	bool cyclic;
 
 	/* For transactions with more than S805_DMA_MAX_DESC data chunks. */
-	dma_addr_t next;
+	s805_dtable * next;
 	
 };
 
@@ -185,17 +185,13 @@ typedef struct s805_chan {
 	
 } s805_chan;
 
-/* Auxiliar structure for dma_dg */
+/* Auxiliar structure for dma_sg */
 struct sg_info {
 
-    struct scatterlist * src_cursor;
-	struct scatterlist * dst_cursor;
+    struct scatterlist * cursor;
+    struct scatterlist * next;
 	
-    struct scatterlist * next_src;
-	struct scatterlist * next_dst;
-	
-	uint src_bytes;
-	uint dst_bytes;
+	uint bytes;
 	
 };
 
@@ -272,8 +268,8 @@ static s805_dtable * def_init_new_tdesc (struct s805_chan * c, unsigned int fram
 
 	/* desc_tbl->table->control |= S805_DTBL_NO_BREAK;                   
 	   
-	   Process the whole descriptor at once, without thread switching 
-																		 
+	   Process the whole descriptor at once, without thread switching. 
+	   
 	   This needs to be tested with this approach, if this bit is set the threads will be processed at once, 
 	   without thread switching, what will make that the interrupts to be delivered more separated in time, however
 	   if this bit is not set the work of the active threads will be, in some manner, balanced so if we see the
@@ -281,24 +277,103 @@ static s805_dtable * def_init_new_tdesc (struct s805_chan * c, unsigned int fram
 	   implementation tries) to not set this bit may be a benefit, specially if "in_progress" transactions differ
 	   in size. In the other hand if "in_progress" transactions are similar in size interrupts may be delivered very
 	   close in time, hence "nestedly preempted", what may cause malfunction.
-																		 
+	   
 	   As exposed above, to be tested. 
 																		 
 	*/
 
-	if (frames && !(frames % S805_DMA_MAX_DESC))
-		desc_tbl->table->control |= S805_DTBL_IRQ;                    /* 
-																		 This bit will be set for every S805_DMA_MAX_DESC = 128 data chunks. Since the pool will allocate, in first instance, a whole page to deliver our 
-																		 32 Bytes blocks if more than PAGE_SIZE / 32 = 128 blocks are allocated for a transaction and the new page allocated by the pool is not contiguous 
-																		 with the latter one descriptors won't be contiguous in memory, hence the hardware won't be able to fetch the descriptor 129 letting the transaction 
-																		 unfinished. So we force an interrupt every S805_DMA_MAX_DESC to reallocate the adresses in the hardware registers every time the page where the 
-																		 descriptors reside attempts to change.
-																		 
-																	  */
+	if (!((frames + 1) % S805_DMA_MAX_DESC))
+		desc_tbl->table->control |= S805_DTBL_IRQ;
+	/* 
+	   This bit will be set for every S805_DMA_MAX_DESC = 128 data chunks. Since the pool will allocate, in first instance, a whole page to deliver our 
+	   32 Bytes blocks if more than PAGE_SIZE / 32 = 128 blocks are allocated for a transaction and the new page allocated by the pool is not contiguous 
+	   with the latter one descriptors won't be contiguous in memory, hence the hardware won't be able to fetch the descriptor 129 letting the transaction 
+	   unfinished. So we force an interrupt every S805_DMA_MAX_DESC to reallocate the adresses in the hardware registers every time the page where the 
+	   descriptors reside attempts to change. Being realistic the pool will jump the last block on a page to force non contiguity when the page change
+	   for the same reason mentioned above, hence our real limit will be S805_DMA_MAX_DESC = 127.
+	   
+	*/
 		
 	return desc_tbl;
 	
 }
+
+/* Auxiliar functions for DMA_SG: */
+
+static inline void fwd_sg (struct sg_info * info) {
+
+	if (info->cursor) {
+
+		info->cursor = info->next;
+		info->next = sg_next(info->cursor);
+		info->bytes = 0;
+		
+	}
+}
+
+static int get_sg_icg (struct sg_info * info) {
+
+	/* 
+	   Notice the integer return type, since we don't know if information will be arranged sequentially in memory. 
+	   
+	*/
+
+	if (info->next)
+		return sg_dma_address(info->next) - sg_dma_address(info->cursor);
+	else
+		return -1;
+}
+
+static uint get_sg_remain (struct sg_info * info) {
+	
+	if (info->cursor)
+		return sg_dma_len(info->cursor) - info->bytes;
+	else
+		return UINT_MAX;
+}
+
+static bool sg_got_cursor (struct sg_info * info) {
+
+	return info->cursor;
+
+}
+
+/* Not needed for this approach, preserved until test. */
+static s805_dtable * get_next_chunk (s805_dtable * curr, struct s805_desc *d) {
+
+	if (list_is_last(&curr->elem, &d->desc_list))
+		return NULL;
+	else
+		return list_next_entry(curr, elem);
+}
+
+static s805_dtable * move_along (s805_dtable * cursor, struct s805_desc *d) {
+
+	s805_dtable * aux = get_next_chunk(cursor, d);
+	
+	if (!aux) {
+
+		/* Log debug here. */
+		
+		list_add_tail(&cursor->elem, &d->desc_list);
+		d->frames ++;
+		
+		return def_init_new_tdesc(d->c, d->frames);
+
+	} else
+		return aux;
+
+}
+
+static bool sg_ent_complete (struct sg_info * info) {
+
+	if (info->cursor)
+		return sg_dma_len(info->cursor) == info->bytes;
+	else
+		return false;
+}
+
+/* END of Auxiliar functions for DMA_SG */
 
 /* 
    Bypass function for dma_prep_slave_sg (dmaengine interface) 
@@ -386,14 +461,10 @@ s805_dma_prep_slave_sg( struct dma_chan *chan,
 	
 
 	/* Datasheet p.57 entry 1 & 2 */
-	if (dev_width != DMA_SLAVE_BUSWIDTH_8_BYTES) {
-		
-		dev_err(chan->device->dev, "Unsupported buswidth: %i\n", dev_width);
-		return NULL;
-
-	}
+	if (dev_width != DMA_SLAVE_BUSWIDTH_8_BYTES) 
+		dev_warn(chan->device->dev, "%s: Unsupported buswidth: %i, only 8 bytes buswidth supported.\n", __func__, dev_width);
 	
-	/* Allocate and setup the descriptor. GFP_NOWAIT */
+	/* Allocate and setup the descriptor. */
 	d = kzalloc(sizeof(struct s805_desc), GFP_NOWAIT);
 	if (!d)
 		return NULL;
@@ -413,6 +484,8 @@ s805_dma_prep_slave_sg( struct dma_chan *chan,
 	 */
     
 	for_each_sg(sgl, sgent, sg_len, i) {
+
+		/* Optimize to reduce used descriptors: Hint reuse DMA_SG aux funcs / structs*/
 		
 		dma_addr_t addr = sg_dma_address(sgent); /* is the offset taken into account here? */
 		unsigned int len = sg_dma_len(sgent);
@@ -991,125 +1064,6 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 	return NULL;
 }
 
-/* Auxiliar functions for DMA_SG: */
-
-static inline void fwd_dst (struct sg_info * info) {
-
-	if (info->dst_cursor) {
-		
-		info->dst_cursor = info->next_dst;
-		info->next_dst = sg_next(info->dst_cursor);
-		info->dst_bytes = 0;
-		
-	}
-	
-}
-
-static inline void fwd_src (struct sg_info * info) {
-
-	if (info->src_cursor) {
-
-		info->src_cursor = info->next_src;
-		info->next_src = sg_next(info->src_cursor);
-		info->src_bytes = 0;
-		
-	}
-}
-
-static int get_src_icg (struct sg_info * info) {
-
-	/* 
-	   Notice the integer return type, since we don't know if information will be arranged sequentially in memory. 
-	
-	*/
-
-	if (info->next_dst)
-		return sg_dma_address(info->next_src) - sg_dma_address(info->src_cursor);
-	else
-		return -1;
-	
-}
-
-static int get_dst_icg (struct sg_info * info) {
-
-	/* 
-	   Notice the integer return type, since we don't know if information will be arranged sequentially in memory. 
-	
-	*/
-
-	if (info->next_dst)
-		return sg_dma_address(info->next_dst) - sg_dma_address(info->dst_cursor);
-	else
-		return -1;
-}
-
-static uint get_src_remain (struct sg_info * info) {
-
-	if (info->src_cursor)
-		return sg_dma_len(info->src_cursor) - info->src_bytes;
-	else
-		return UINT_MAX;
-}
-
-static uint get_dst_remain (struct sg_info * info) {
-	
-	if (info->dst_cursor)
-		return sg_dma_len(info->dst_cursor) - info->dst_bytes;
-	else
-		return UINT_MAX;
-}
-
-static bool got_cursor (struct sg_info * info) {
-
-	return (info -> src_cursor || info -> dst_cursor);
-
-}
-
-/* Not needed for this approach, preserved until test. */
-static s805_dtable * get_next_chunk (s805_dtable * curr, struct s805_desc *d) {
-
-	if (list_is_last(&curr->elem, &d->desc_list))
-		return NULL;
-	else
-		return list_next_entry(curr, elem);
-}
-
-static s805_dtable * move_along (s805_dtable * cursor, struct s805_desc *d) {
-
-	s805_dtable * aux = get_next_chunk(cursor, d);
-	
-	if (!aux) {
-
-		/* Log debug here. */
-		
-		list_add_tail(&cursor->elem, &d->desc_list);
-		d->frames ++;
-		
-		return def_init_new_tdesc(d->c, d->frames);
-
-	} else
-		return aux;
-
-}
-
-static bool src_ent_complete (struct sg_info * info) {
-
-	if (info->src_cursor)
-		return sg_dma_len(info->src_cursor) == info->src_bytes;
-	else
-		return false;
-}
-
-static bool dst_ent_complete (struct sg_info * info) {
-
-	if (info->dst_cursor)
-		return sg_dma_len(info->dst_cursor) == info->dst_bytes;
-	else
-		return false;
-}
-
-/* END of Auxiliar functions for DMA_SG */
-
 static struct dma_async_tx_descriptor *
 s805_dma_prep_sg (struct dma_chan *chan,
 				  struct scatterlist *dst_sg, unsigned int dst_nents,
@@ -1118,7 +1072,7 @@ s805_dma_prep_sg (struct dma_chan *chan,
 {
 	struct s805_chan *c = to_s805_dma_chan(chan);
 	struct s805_desc *d;
-	struct sg_info pinfo;
+	struct sg_info src_info, dst_info;
 	s805_dtable * desc_tbl, * temp;
 	unsigned int j, src_len, dst_len, icg, next_icg, next_burst, bytes = 0;
 	dma_addr_t src_addr, dst_addr;
@@ -1126,11 +1080,11 @@ s805_dma_prep_sg (struct dma_chan *chan,
 	bool new_block;
 	
 	//struct data_chunk last_dst, last_src;
-	for_each_sg(src_sg, pinfo.src_cursor, src_nents, j) 
-		bytes += sg_dma_len(pinfo.src_cursor);
+	for_each_sg(src_sg, src_info.cursor, src_nents, j) 
+		bytes += sg_dma_len(src_info.cursor);
 	
-	for_each_sg(dst_sg, pinfo.dst_cursor, dst_nents, j) 
-		bytes -= sg_dma_len(pinfo.dst_cursor);
+	for_each_sg(dst_sg, dst_info.cursor, dst_nents, j) 
+		bytes -= sg_dma_len(dst_info.cursor);
 	
 	if (bytes != 0) { 
 		
@@ -1148,25 +1102,25 @@ s805_dma_prep_sg (struct dma_chan *chan,
 	INIT_LIST_HEAD(&d->desc_list);
 
 	/* Auxiliar struct to iterate the lists. */
-	pinfo.src_cursor = src_sg;
-	pinfo.dst_cursor = dst_sg;
+	src_info.cursor = src_sg;
+	dst_info.cursor = dst_sg;
 	
-	pinfo.next_src = sg_next(pinfo.src_cursor);
-	pinfo.next_dst = sg_next(pinfo.dst_cursor);
+	src_info.next = sg_next(src_info.cursor);
+	dst_info.next = sg_next(dst_info.cursor);
 	
-	pinfo.src_bytes = 0;
-	pinfo.dst_bytes = 0;
+	src_info.bytes = 0;
+	dst_info.bytes = 0;
 	
 	desc_tbl = def_init_new_tdesc(c, d->frames);
 	
-	src_addr = sg_dma_address(pinfo.src_cursor);
-	dst_addr = sg_dma_address(pinfo.dst_cursor);
+	src_addr = sg_dma_address(src_info.cursor);
+	dst_addr = sg_dma_address(dst_info.cursor);
 	
 	/* "Fwd logic" not optimal, first approach, must do. */
-	while (got_cursor(&pinfo)) {
+	while (sg_got_cursor(&src_info) || sg_got_cursor(&dst_info)) {
 		
-		src_len = get_src_remain(&pinfo);
-		dst_len = get_dst_remain(&pinfo);
+		src_len = get_sg_remain(&src_info);
+		dst_len = get_sg_remain(&dst_info);
 	   
 	    min_size = min(dst_len, src_len);
 		
@@ -1181,27 +1135,27 @@ s805_dma_prep_sg (struct dma_chan *chan,
 				if (!desc_tbl)
 					goto error_allocation;
 				
-				desc_tbl->table->src = src_addr + (dma_addr_t) pinfo.src_bytes;
-				desc_tbl->table->dst = dst_addr + (dma_addr_t) pinfo.dst_bytes;	
+				desc_tbl->table->src = src_addr + (dma_addr_t) src_info.bytes;
+				desc_tbl->table->dst = dst_addr + (dma_addr_t) dst_info.bytes;	
 					
 			}
 			
 		    desc_tbl->table->count += act_size;
 			
-			pinfo.src_bytes += act_size;
-			pinfo.dst_bytes += act_size;
+			src_info.bytes += act_size;
+			dst_info.bytes += act_size;
 			
 		    min_size -= act_size;
 		}
 
 		new_block = true;
 	   
-		if (src_ent_complete(&pinfo)) {
+		if (sg_ent_complete(&src_info)) {
 
-			icg = get_src_icg(&pinfo);
-			next_burst = sg_dma_len(pinfo.next_src);
-			fwd_src(&pinfo);
-			next_icg = get_src_icg(&pinfo);
+			icg = get_sg_icg(&src_info);
+			next_burst = sg_dma_len(src_info.next);
+			fwd_sg(&src_info);
+			next_icg = get_sg_icg(&src_info);
 				
 			if (!desc_tbl->table->src_burst) {
 
@@ -1211,8 +1165,7 @@ s805_dma_prep_sg (struct dma_chan *chan,
 					
 				   
 					if (icg > 0 && icg <= S805_DMA_MAX_SKIP && icg == next_icg) {
-						
-							
+								
 						desc_tbl->table->src_burst = desc_tbl->table->count; 
 						desc_tbl->table->src_skip = icg;
 						new_block = false;	
@@ -1221,15 +1174,15 @@ s805_dma_prep_sg (struct dma_chan *chan,
 				}
 			}
 			
-			src_addr = sg_dma_address(pinfo.src_cursor);
+			src_addr = sg_dma_address(src_info.cursor);
 		}
 			
-		if (dst_ent_complete(&pinfo)) {
+		if (sg_ent_complete(&dst_info)) {
 
-			icg = get_dst_icg(&pinfo);
-			next_burst = sg_dma_len(pinfo.next_dst);
-			fwd_dst(&pinfo);
-			next_icg = get_dst_icg(&pinfo);
+			icg = get_sg_icg(&dst_info);
+			next_burst = sg_dma_len(dst_info.next);
+			fwd_sg(&dst_info);
+			next_icg = get_sg_icg(&dst_info);
 
 			if (!desc_tbl->table->dst_burst) {
 
@@ -1247,7 +1200,7 @@ s805_dma_prep_sg (struct dma_chan *chan,
 				}
 			}
 
-			dst_addr = sg_dma_address(pinfo.dst_cursor);
+			dst_addr = sg_dma_address(dst_info.cursor);
 		}
 					  
 		if (new_block) {
@@ -1257,8 +1210,8 @@ s805_dma_prep_sg (struct dma_chan *chan,
 			if (!desc_tbl)
 				goto error_allocation;
 			
-			desc_tbl->table->src = src_addr + (dma_addr_t)pinfo.src_bytes;
-			desc_tbl->table->dst = dst_addr + (dma_addr_t)pinfo.dst_bytes;
+			desc_tbl->table->src = src_addr + (dma_addr_t)src_info.bytes;
+			desc_tbl->table->dst = dst_addr + (dma_addr_t)dst_info.bytes;
 		}
 	}
 
@@ -1569,6 +1522,18 @@ static inline void s805_dma_thread_disable ( uint thread_id ) {
 	
 }
 
+static s805_dtable * s805_dma_get_next_addr (s805_dtable * desc) {
+
+	s805_dtable * dtbl = desc;
+	int i;
+
+	/* Must never reach the end of the list. */
+	for (i = 0; i < S805_DMA_MAX_DESC; i++)
+		dtbl = list_next_entry(dtbl, elem);
+	
+	return dtbl;
+}
+
 /*
   
   Write s805 DMAC registers with start and end address of table descriptor list
@@ -1578,7 +1543,7 @@ static inline void s805_dma_thread_disable ( uint thread_id ) {
   
 */
 
-static dma_addr_t s805_dma_allocate_tr (uint thread_id, dma_addr_t addr, uint frames) 
+static s805_dtable * s805_dma_allocate_tr (uint thread_id, s805_dtable * desc, uint frames) 
 {
 	
     u32 status;
@@ -1586,10 +1551,17 @@ static dma_addr_t s805_dma_allocate_tr (uint thread_id, dma_addr_t addr, uint fr
 	
 	uint amount = min(frames, (uint) S805_DMA_MAX_DESC); 
 	
-	s805_dma_thread_disable(thread_id);
+	s805_dma_thread_disable(thread_id);	
+	
+	str_addr = desc->paddr;
+	end_addr = str_addr + (amount * sizeof(struct s805_table_desc));
 
-	str_addr = addr;
-	end_addr = addr + (amount * sizeof(struct s805_table_desc_entry));
+	pr_debug("Allocating %u descriptors for thread %u: 0x%08X - 0x%08X (next = %s)\n",
+			 amount,
+			 thread_id,
+			 str_addr,
+			 end_addr,
+			 amount < frames ? "true" : "false");
 
 	switch(thread_id) {
 	case 0:
@@ -1618,7 +1590,7 @@ static dma_addr_t s805_dma_allocate_tr (uint thread_id, dma_addr_t addr, uint fr
 	WR(S805_DMA_ADD_DESC(thread_id, 0x00), S805_DTBL_ADD_DESC);
 	WR(S805_DMA_ADD_DESC(thread_id, amount), S805_DTBL_ADD_DESC);
 	
-	return amount < frames ? (end_addr + sizeof(struct s805_table_desc_entry)) : 0;
+	return amount < frames ? s805_dma_get_next_addr(desc) : NULL;
 }
 
 /* Protected by manager/general lock (serialized) */
@@ -1628,6 +1600,7 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 	struct s805_desc * d;
 #ifdef DEBUG
 	s805_dtable *desc;
+	uint i = 0;
 #endif
 
 	list_for_each_entry_safe (vd, tmp, &c->vc.desc_issued, node) {
@@ -1641,7 +1614,8 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 			/* Last descriptors will be zeroed */
 			if (!list_is_last(&desc->elem, &d->desc_list)) {
 
-				dev_dbg(d->c->vc.chan.device->dev, "Descriptor (0x%08X) >> ctrl = 0x%08X, src = 0x%08X, dst = 0x%08X, byte_cnt = %u, src_burst = %u, src_skip = %u, dst_burst = %u, dst_skip = %u\n",
+				dev_dbg(d->c->vc.chan.device->dev, "Descriptor %03u (0x%08X) >> ctrl = 0x%08X, src = 0x%08X, dst = 0x%08X, byte_cnt = %u, src_burst = %u, src_skip = %u, dst_burst = %u, dst_skip = %u\n",
+						i,
 						desc->paddr,
 						desc->table->control, 
 						desc->table->src, 
@@ -1652,6 +1626,8 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 						desc->table->dst_burst,
 						desc->table->dst_skip);
 			}
+
+			i++;
 		}
 #endif
 		
@@ -1712,9 +1688,7 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 			list_move_tail(&d->elem, &mgr->in_progress);
 			
 			d->next = s805_dma_allocate_tr (thread,
-											d->next ? d->next : list_first_entry(&d->desc_list,
-																				 s805_dtable,
-																				 elem)->paddr,
+											d->next ? d->next : list_first_entry(&d->desc_list, s805_dtable, elem),
 											d->frames);
 			
 		    d->c->status = DMA_IN_PROGRESS;
@@ -1724,8 +1698,7 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 		    mgr->busy = true;
 			
 		} else
-			s805_dma_thread_disable(thread);
-			
+			s805_dma_thread_disable(thread);	
 	}
 }
 
@@ -2086,9 +2059,19 @@ static void s805_dma_issue_pending(struct dma_chan *chan)
 static void s805_dma_free_chan_resources(struct dma_chan *chan)
 {
 	struct s805_chan *c = to_s805_dma_chan(chan);
+
+	c->status = DMA_PAUSED;
 	
 	vchan_free_chan_resources(&c->vc);
+		   	
+	/* Dismiss all pending operations */
+	spin_lock(&mgr->lock);
+	s805_dma_dismiss_chann(c);
+	spin_unlock(&mgr->lock);
+			
 	dma_pool_destroy(c->pool);
+
+	c->status = DMA_SUCCESS;
 	
 	dev_dbg(c->vc.chan.device->dev, "Freeing DMA channel.\n");
 }
