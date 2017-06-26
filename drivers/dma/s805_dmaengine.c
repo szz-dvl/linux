@@ -568,12 +568,12 @@ s805_dma_prep_slave_sg( struct dma_chan *chan,
 			
 		    desc_tbl->table->count += act_size;
 			info.bytes += act_size;
-			
+	
 		    size -= act_size;
 		}
 		
 		/* Completed sg entry here. */
-		
+			
 		new_block = true;
 		
 		if (direction != DMA_DEV_TO_DEV) {
@@ -595,16 +595,13 @@ s805_dma_prep_slave_sg( struct dma_chan *chan,
 
 			default:
 				goto error_list;
-
+				
 			}
 
-			
 			icg = get_sg_icg(&info);
 			next_burst = info.next ? sg_dma_len(info.next) : -1;
 			fwd_sg(&info);
 			next_icg = get_sg_icg(&info);
-
-			//pr_info("ICG = %d, NEXT_ICG = %d, NEXT_BURST = %d, my_burst =  %u, my_skip = %u, count = %u\n", icg, next_icg, next_burst, *my_burst, *my_skip, desc_tbl->table->count);
 			
 			if (*my_burst == 0) {
 
@@ -626,9 +623,14 @@ s805_dma_prep_slave_sg( struct dma_chan *chan,
 			
 			addr = info.cursor ? sg_dma_address(info.cursor) : 0; /* Already forwarded. */
 			
-		} else
-			new_block = false; /* If a new block is needed will be allocated in the above loop for DMA_DEV_TO_DEV */
+		} else {
 
+			/* If a new block is needed will be allocated in the above loop for DMA_DEV_TO_DEV */
+			
+			fwd_sg(&info);
+			new_block = false; 
+		}
+		
 		new_block = new_block && info.cursor;
 		
 		if (new_block) {
@@ -668,7 +670,7 @@ s805_dma_prep_slave_sg( struct dma_chan *chan,
 			
 		}	
 	}
-
+	
 	/* Ensure that the last descriptor will interrupt us. */
 	list_entry(d->desc_list.prev, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
 	
@@ -2107,7 +2109,7 @@ static int s805_dma_control (struct dma_chan *chan,
 			
 			/* If memory to device (read) we need the dst 32 bit address present */
 			if ((cfg->direction == DMA_MEM_TO_DEV) &&
-				(cfg->src_addr_width != DMA_SLAVE_BUSWIDTH_8_BYTES || !cfg->dst_addr)) 
+				(cfg->dst_addr_width != DMA_SLAVE_BUSWIDTH_8_BYTES || !cfg->dst_addr)) 
 				{
 					return -EINVAL;
 				}
@@ -2203,7 +2205,7 @@ static void s805_dma_free_chan_resources(struct dma_chan *chan)
 	c->status = DMA_PAUSED;
 	
 	vchan_free_chan_resources(&c->vc);
-		   	
+	
 	/* Dismiss all pending operations */
 	spin_lock(&mgr->lock);
 	s805_dma_dismiss_chann(c);
@@ -2227,7 +2229,7 @@ static int s805_dma_alloc_chan_resources(struct dma_chan *chan)
 	struct s805_chan *c = to_s805_dma_chan(chan);
 	struct device *dev = c->vc.chan.device->dev;
 
-	dev_dbg(dev, "Allocating DMA channel.\n");
+    dev_dbg(dev, "Allocating DMA channel.\n");
 
 	c->pool = dma_pool_create(dev_name(dev),
 							  dev,
