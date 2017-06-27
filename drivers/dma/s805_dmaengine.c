@@ -738,6 +738,33 @@ static s805_dtable * ileaved_def_init_new_tdesc (struct s805_chan *c,
 	return desc_tbl;
 }
 
+
+/*
+  Documentation is a little bit confusing for "device_prep_interleaved_dma", in the following lines of "include/linux/dmaengine.h" one can read:
+
+  120 -> struct data_chunk - Element of scatter-gather list that makes a frame.
+  
+  [ . . . ]
+  
+  134 -> struct dma_interleaved_template - Template to convey DMAC the transfer pattern and attributes.
+  
+  [ . . . ]
+
+  147 -> @numf: Number of frames in this template.
+  148 -> @frame_size: Number of chunks in a frame i.e, size of sgl[].
+
+  The concept of frame is a little bit confusing to me, so I'm using "frame_size" as the reference value to iterate the chunks stored in "sgl", hence, 
+  "numf" is ignored for this implementation. To my knowledge, to support more than one frame per transaction we will need to modify the interface
+  to accept an array of "dma_interleaved_template" structs as a parameter. In the following link I found a patch implementing this idea:
+
+       * http://lists.infradead.org/pipermail/linux-arm-kernel/2014-February/233185.html
+
+  However I'm trying to modify the interfece the minimum possible, and, any change made in it will be an addition, to expose some of the capabilities
+  supported by the hardware not present in 3.x (such as "device_prep_dma_memset" or "device_prep_dma_memcpy") in a confortable way for the user. No 
+  change will be done, then, in the existent interface, especially for portability reasons.
+  
+*/
+
 static struct dma_async_tx_descriptor * 
 s805_dma_prep_interleaved (struct dma_chan *chan, 
 						   struct dma_interleaved_template *xt, 
@@ -749,7 +776,7 @@ s805_dma_prep_interleaved (struct dma_chan *chan,
     struct data_chunk last;
 	struct s805_table_desc *table;
 	s805_dtable *desc_tbl, *temp;
-	int i, j, count, tmp_size, byte_cnt = 0, act_size = 0, idx = 0;
+	int idx, count, tmp_size, byte_cnt = 0, act_size = 0;
 
     dev_dbg(c->vc.chan.device->dev, "DMA interleaved (xt): \n"	\
 			"\tsrc_start: 0x%08x\n"								\
@@ -764,13 +791,13 @@ s805_dma_prep_interleaved (struct dma_chan *chan,
 			, xt->src_start, xt->dst_start, xt->dir, xt->src_inc ? "true" : "false", xt->dst_inc ? "true" : "false", 
 			xt->src_sgl ? "true" : "false", xt->dst_sgl ? "true" : "false", xt->numf, xt->frame_size);
 	
-	if (xt->dir == DMA_DEV_TO_DEV || 
-		(!xt->src_inc && (xt->src_sgl || xt->dir != DMA_DEV_TO_MEM)) || 
-		(!xt->dst_inc && (xt->dst_sgl || xt->dir != DMA_MEM_TO_DEV))) {
+	if ((!xt->src_inc && (xt->src_sgl || (xt->dir != DMA_DEV_TO_MEM && xt->dir != DMA_DEV_TO_DEV))) || 
+		(!xt->dst_inc && (xt->dst_sgl || (xt->dir != DMA_MEM_TO_DEV && xt->dir != DMA_DEV_TO_DEV))) ||
+		((!xt->dst_inc && !xt->src_inc) && xt->dir != DMA_DEV_TO_DEV) ||
+		((xt->dst_inc  && xt->src_inc)  && xt->dir != DMA_MEM_TO_MEM)) {
 		
 		dev_err(chan->device->dev, "Bad Configuration provided.\n");
-		return NULL;
-		
+		return NULL;		
 	}
 	
 	/* Allocate and setup the descriptor. */
@@ -782,176 +809,153 @@ s805_dma_prep_interleaved (struct dma_chan *chan,
 	d->frames = 0;
 	INIT_LIST_HEAD(&d->desc_list);
 	
-	/*
-	 * At this point we need to find out the number of descriptors (physicall descriptors, it is the ones in DS p.57) we need to allocate here,
-	 * 
-	 * Assumptions:
-	 *     
-	 *    * frame_size = number of xt->sgl entries for each frame,
-	 *    
-	 *    * Each frame is supposed to be in order, it is, if frame size is 6, the sgl entries will be token 6 by 6, and it will make a frame, 
-	 *      next frame will then start one position after the end of the later. Then ARRAY_SIZE(xt->sgl) / nframes == frame_size 
-	 *      must evaluate allways to true here. 
-	 *    
-     *    * Data chunks sizes and skips values may vary inside the same frame.
-	 *
-	 * Questions:
-	 *
-	 *    * Must we raise a warning if any acces is not aligned with 8 Bytes buswidth, 64 bit accesses??
-	 *    
-	 *    
-	 */
-	
 	count = 0;
 	byte_cnt = 0;
 	last.size = xt->sgl[d->frames].size;
 	last.icg = xt->sgl[d->frames].icg;
 	desc_tbl = ileaved_def_init_new_tdesc(c, xt, count, byte_cnt, d->frames);
 	
-	if (!desc_tbl)
+	if (!desc_tbl) {
+		
+		kfree(d);
 		return NULL;
-	else
+		
+	} else
 		table = desc_tbl->table;
 	
 	d->frames ++;
+	
+	for (idx = 0; idx < xt->frame_size; idx++) {
 		
-	for (i = 0; i<xt->numf; i++) { 
-		
-		for (j = 0; j<xt->frame_size; j++) {
+		//dev_dbg(c->vc.chan.device->dev, "Adding data chunk %d: \n\tsize = %d\n\ticg = %d\n", idx, xt->sgl[idx].size, xt->sgl[idx].icg);
 			
-			idx = (i * xt->frame_size) + j;
+		/* 
+		 * 2D move:
+		 *
+		 * It is unsupported for the current kernel (3.10.y) to distinguish between the lengths of the skip and burts for the src and dst.
+		 *
+		 */
 			
-			//dev_dbg(c->vc.chan.device->dev, "Adding data chunk %d: \n\tsize = %d\n\ticg = %d\n", idx, xt->sgl[idx].size, xt->sgl[idx].icg);
+		if (xt->dst_sgl || xt->src_sgl) {
 			
-			/* 
-			 * 2D move:
-			 *
-			 * It is unsupported for the current kernel (3.10.y) to distinguish between the lengths of the skip and burts for the src and dst.
-			 *
-			 */
+			/* if ( xt->sgl[idx].icg == 0 ) */
+			/* 	dev_warn(c->vc.chan.device->dev, "ICG size 0 received for data chunk %d while src_sgl / dst_sgl evaluates to true.\n", idx); */
 			
-			if (xt->dst_sgl || xt->src_sgl) {
-				
-				/* if ( xt->sgl[idx].icg == 0 ) */
-				/* 	dev_warn(c->vc.chan.device->dev, "ICG size 0 received for data chunk %d while src_sgl / dst_sgl evaluates to true.\n", idx); */
-				
 					
-				for (tmp_size = xt->sgl[idx].size; tmp_size > 0; tmp_size -= S805_DMA_MAX_BURST) {
+			for (tmp_size = xt->sgl[idx].size; tmp_size > 0; tmp_size -= S805_DMA_MAX_BURST) {
 					
-					if (tmp_size <= S805_DMA_MAX_BURST)
-						act_size = tmp_size;
+				if (tmp_size <= S805_DMA_MAX_BURST)
+					act_size = tmp_size;
+				else
+					act_size = S805_DMA_MAX_BURST;
+					
+				if ( ((table->count + act_size) >= S805_MAX_TR_SIZE || last.size != xt->sgl[idx].size || last.icg != xt->sgl[idx].icg) &&
+					 ((table->src_skip != 0 && xt->src_sgl) || (table->dst_skip != 0 && xt->dst_sgl)) ) {
+						
+					list_add_tail(&desc_tbl->elem, &d->desc_list);
+						
+					desc_tbl = ileaved_def_init_new_tdesc(c, xt, count, byte_cnt, d->frames);
+						
+					if (!desc_tbl)
+						goto error_allocation;
 					else
-						act_size = S805_DMA_MAX_BURST;
-					
-					if ( ((table->count + act_size) >= S805_MAX_TR_SIZE || last.size != xt->sgl[idx].size || last.icg != xt->sgl[idx].icg) &&
-						 ((table->src_skip != 0 && xt->src_sgl) || (table->dst_skip != 0 && xt->dst_sgl)) ) {
-						
-						list_add_tail(&desc_tbl->elem, &d->desc_list);
-						
-						desc_tbl = ileaved_def_init_new_tdesc(c, xt, count, byte_cnt, d->frames);
-						
-						if (!desc_tbl)
-							goto error_allocation;
-						else
-							table = desc_tbl->table;
+						table = desc_tbl->table;
 							
-						d->frames++;
-					}
-													
-					table->count += act_size;
-					
-					/* 
-					   Notice that the following statement will take into account ICG sizes bigger than S805_DMA_MAX_SKIP, 
-					   so if an ICG bigger than the supported by the hardware is demanded a new block will be allocated
-					   with the addresses offsetted as demanded by ICG. 
-					
-					*/
-					
-					count += (act_size + xt->sgl[idx].icg);
-					byte_cnt += act_size;
-							
-					if (xt->src_sgl) {
-						table->src_burst = act_size;
-
-						if (xt->sgl[idx].icg <= S805_DMA_MAX_SKIP)
-							table->src_skip = xt->sgl[idx].icg;
-					}
-						
-					if (xt->dst_sgl) {
-						table->dst_burst = act_size;
-
-						if (xt->sgl[idx].icg <= S805_DMA_MAX_SKIP)
-							table->dst_skip = xt->sgl[idx].icg;
-					}
-						
-					if (xt->sgl[idx].icg > S805_DMA_MAX_SKIP) {
-						
-						list_add_tail(&desc_tbl->elem, &d->desc_list);
-							
-						desc_tbl = ileaved_def_init_new_tdesc(c, xt, count, byte_cnt, d->frames);
-							
-						if (!desc_tbl)
-							goto error_allocation;
-						else
-							table = desc_tbl->table;
-							
-						d->frames++;
-
-					} 
+					d->frames++;
 				}
+													
+				table->count += act_size;
 
-				last.icg  = xt->sgl[idx].icg;
-				last.size = xt->sgl[idx].size;
+				/* 
+				   Notice that the following statement will take into account ICG sizes bigger than S805_DMA_MAX_SKIP, 
+				   so if an ICG bigger than the supported by the hardware is demanded a new block will be allocated
+				   with the addresses offsetted as demanded. 
+					   
+				*/
 					
-			} else { /* 1D move */
+				count += (act_size + xt->sgl[idx].icg);
+				byte_cnt += act_size;
+							
+				if (xt->src_sgl) {
+					table->src_burst = act_size;
+
+					if (xt->sgl[idx].icg <= S805_DMA_MAX_SKIP)
+						table->src_skip = xt->sgl[idx].icg;
+				}
+						
+				if (xt->dst_sgl) {
+					table->dst_burst = act_size;
+
+					if (xt->sgl[idx].icg <= S805_DMA_MAX_SKIP)
+						table->dst_skip = xt->sgl[idx].icg;
+				}
+						
+				if (xt->sgl[idx].icg > S805_DMA_MAX_SKIP) {
+						
+					list_add_tail(&desc_tbl->elem, &d->desc_list);
+							
+					desc_tbl = ileaved_def_init_new_tdesc(c, xt, count, byte_cnt, d->frames);
+							
+					if (!desc_tbl)
+						goto error_allocation;
+					else
+						table = desc_tbl->table;
+							
+					d->frames++;
+
+				} 
+			}
+
+			last.icg  = xt->sgl[idx].icg;
+			last.size = xt->sgl[idx].size;
+					
+		} else { /* 1D move */
 				
-				for (tmp_size = xt->sgl[idx].size; tmp_size > 0; tmp_size -= S805_MAX_TR_SIZE) {
+			for (tmp_size = xt->sgl[idx].size; tmp_size > 0; tmp_size -= S805_MAX_TR_SIZE) {
 					
-					if (tmp_size <= S805_MAX_TR_SIZE) {
+				if (tmp_size <= S805_MAX_TR_SIZE) {
 						
-						if ((table->count + tmp_size) > S805_MAX_TR_SIZE) {
+					if ((table->count + tmp_size) > S805_MAX_TR_SIZE) {
 							
-							list_add_tail(&desc_tbl->elem, &d->desc_list);
+						list_add_tail(&desc_tbl->elem, &d->desc_list);
 							
-							desc_tbl = ileaved_def_init_new_tdesc(c, xt, count, byte_cnt, d->frames);
+						desc_tbl = ileaved_def_init_new_tdesc(c, xt, count, byte_cnt, d->frames);
 							
-							if (!desc_tbl)
-								goto error_allocation;
-							else
-								table = desc_tbl->table;
+						if (!desc_tbl)
+							goto error_allocation;
+						else
+							table = desc_tbl->table;
 							
-							d->frames++;
-						}
-						
-						table->count += tmp_size;
-						count += tmp_size;
-						
-					} else {
-						
-						/* We need a new descriptor here */
-						if (table->count) {
-							
-							list_add_tail(&desc_tbl->elem, &d->desc_list);
-							
-							desc_tbl = ileaved_def_init_new_tdesc(c, xt, count, byte_cnt, d->frames);
-							
-							if (!desc_tbl)
-								goto error_allocation;
-							else
-								table = desc_tbl->table;
-							
-							d->frames++;
-						}
-						
-						table->count += S805_MAX_TR_SIZE;
-						count += S805_MAX_TR_SIZE;
+						d->frames++;
 					}
+						
+					table->count += tmp_size;
+					count += tmp_size;
+						
+				} else {
+						
+					/* We need a new descriptor here */
+					if (table->count) {
+							
+						list_add_tail(&desc_tbl->elem, &d->desc_list);
+							
+						desc_tbl = ileaved_def_init_new_tdesc(c, xt, count, byte_cnt, d->frames);
+							
+						if (!desc_tbl)
+							goto error_allocation;
+						else
+							table = desc_tbl->table;
+							
+						d->frames++;
+					}
+						
+					table->count += S805_MAX_TR_SIZE;
+					count += S805_MAX_TR_SIZE;
 				}
 			}
+		}
 			
-		} //j
-		
-	} //i
+	} //idx
 
 	/* Ensure the last descriptor will interrupt us */
     table->control |= S805_DTBL_IRQ;
@@ -1210,7 +1214,6 @@ s805_dma_prep_sg (struct dma_chan *chan,
 	int min_size, act_size, icg, next_icg, next_burst;
 	bool new_block;
 	
-	//struct data_chunk last_dst, last_src;
 	for_each_sg(src_sg, src_info.cursor, src_nents, j) 
 		bytes += sg_dma_len(src_info.cursor);
 	
@@ -1756,7 +1759,8 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 			/* Last descriptors will be zeroed */
 			if (!list_is_last(&desc->elem, &d->desc_list)) {
 
-				dev_dbg(d->c->vc.chan.device->dev, "Descriptor %03u (0x%08X) >> ctrl = 0x%08X, src = 0x%08X, dst = 0x%08X, byte_cnt = %u, src_burst = %u, src_skip = %u, dst_burst = %u, dst_skip = %u\n",
+				dev_dbg(d->c->vc.chan.device->dev, "0x%p %03u (0x%08X): ctrl = 0x%08X, src = 0x%08X, dst = 0x%08X, byte_cnt = %u, src_burst = %u, src_skip = %u, dst_burst = %u, dst_skip = %u\n",
+						d,
 						i,
 						desc->paddr,
 						desc->table->control, 
