@@ -162,11 +162,11 @@ struct s805_desc {
 	/* Struct to store the information for memset source value */
 	struct memset_info * memset;
 
-	/* Boolean for cyclic transfers. */
-	bool cyclic;
-
 	/* For transactions with more than S805_DMA_MAX_DESC data chunks. */
 	s805_dtable * next;
+
+	/* Root descriptor for the chain of cyclic callbacks, if present the transaction is cyclic. */
+	struct dma_async_tx_descriptor * cyclic;
 	
 };
 
@@ -675,10 +675,7 @@ s805_dma_prep_slave_sg( struct dma_chan *chan,
 	list_entry(d->desc_list.prev, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
 	
 	add_zeroed_tdesc(d);
-	
-	/* Assert cyclic false for this descriptor */
-	d->cyclic = false;
-	
+
 	return vchan_tx_prep(&c->vc, &d->vd, flags);
 	
  error_list:
@@ -964,9 +961,6 @@ s805_dma_prep_interleaved (struct dma_chan *chan,
 
 	add_zeroed_tdesc(d);
 	
-	/* Assert cyclic false for this descriptor */
-	d->cyclic = false;
-	
 	return vchan_tx_prep(&c->vc, &d->vd, flags);
 	
  error_allocation:
@@ -1154,10 +1148,7 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 	d->frames = 0;
 	INIT_LIST_HEAD(&d->desc_list);
 	
-	/* Assert cyclic true for this descriptor */
-	d->cyclic = true;
-	
-	root = vchan_tx_prep(&c->vc, &d->vd, flags);
+	d->cyclic = root = vchan_tx_prep(&c->vc, &d->vd, flags);
 	parent = root;
 	cursor = root->next;
 	root->parent = root;
@@ -1222,21 +1213,20 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 			d->frames = 0;
 			INIT_LIST_HEAD(&d->desc_list);
 	
-			/* Assert cyclic true for this descriptor */
-			d->cyclic = true;
+			d->cyclic = root;
 			
 			cursor = vchan_tx_prep(&c->vc, &d->vd, flags);
 			cursor->parent = parent;
 			
 			parent = cursor;
-			cursor = cursor->next;
-
+			cursor = cursor->next; /* Must be NULL in first instance, so "error_list" tag must be correct. */
+			
 			desc_tbl = cyclic_def_init_new_tdesc(c, src_addr, dst_addr, direction, byte_count, d->frames);
 			
 			if (!desc_tbl) 
 				goto error_list;
 		} else
-			cursor = NULL; /* Close the descriptor chain. */
+			cursor = root; /* Close the descriptor chain. */
 	}
 	
 	return root;
@@ -1432,9 +1422,6 @@ s805_dma_prep_sg (struct dma_chan *chan,
 	
 	add_zeroed_tdesc(d);
 	
-	/* Assert cyclic false for this descriptor */
-	d->cyclic = false;
-	
 	return vchan_tx_prep(&c->vc, &d->vd, flags);
 	
  error_allocation:
@@ -1507,9 +1494,6 @@ s805_dma_prep_memcpy (struct dma_chan *chan,
 	list_entry(d->desc_list.prev, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
 
 	add_zeroed_tdesc(d);
-	
-	/* Assert cyclic false for this descriptor */
-	d->cyclic = false;
 	
 	return vchan_tx_prep(&c->vc, &d->vd, flags);
 	
@@ -1626,10 +1610,7 @@ s805_dma_prep_memset (struct dma_chan *chan,
 	list_entry(d->desc_list.prev, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
 
 	add_zeroed_tdesc(d);
-	
-	/* Assert cyclic false for this descriptor */
-	d->cyclic = false;
-	
+		
 	return vchan_tx_prep(&c->vc, &d->vd, flags);
 
  error_allocation:
@@ -1680,8 +1661,6 @@ s805_dma_prep_interrupt (struct dma_chan *chan,
 	d->c = to_s805_dma_chan(chan);
 	INIT_LIST_HEAD(&d->desc_list);
 	
-	d->cyclic = false;
-	
 	return vchan_tx_prep(&c->vc, &d->vd, flags);
 	
 
@@ -1691,20 +1670,41 @@ s805_dma_prep_interrupt (struct dma_chan *chan,
 static void s805_dma_desc_free(struct virt_dma_desc *vd)
 {
 
-	struct s805_desc * d = to_s805_dma_desc(&vd->tx);
+	struct s805_desc * d = to_s805_dma_desc(&vd->tx), * aux;
 	s805_dtable * desc_tbl, * temp;
+	struct dma_async_tx_descriptor * cursor;
+
+	if (d->cyclic) {
+
+		cursor = d->cyclic->next;
+
+		while (cursor != d->cyclic) {
+
+			aux = to_s805_dma_desc(cursor);
+			
+			list_for_each_entry_safe (desc_tbl, temp, &aux->desc_list, elem) {
+				
+				dma_pool_free(aux->c->pool, desc_tbl->table, desc_tbl->paddr);
+				list_del(&desc_tbl->elem);
+				kfree(desc_tbl);
+		
+			}
+
+			cursor = cursor->next;
+			kfree(aux);
+		}
+	}
 	
 	list_for_each_entry_safe (desc_tbl, temp, &d->desc_list, elem) {
 		
 		dma_pool_free(d->c->pool, desc_tbl->table, desc_tbl->paddr);
 		list_del(&desc_tbl->elem);
 		kfree(desc_tbl);
-		
 	}
 
 	if (d->memset)
 		dma_free_coherent(d->c->vc.chan.device->dev, sizeof(long long), d->memset->value, d->memset->paddr);
-
+	
 	dev_dbg(d->c->vc.chan.device->dev, "Descriptor 0x%p: Freed.", vd);
 	
 	kfree(d);
@@ -1955,7 +1955,7 @@ static enum dma_status s805_dma_process_next_desc ( struct s805_chan *c )
 /* Process completed descriptors -- protected by mgr->lock */
 static void s805_dma_process_completed ( void )
 {
-	struct s805_desc * d, * temp, * next_cyclic;
+	struct s805_desc * d, * temp, * next_cyclic, * root_cyclic;
 	uint idx, thread = 0;
 
 	list_for_each_entry_safe (d, temp, &mgr->completed, elem) {
@@ -1964,27 +1964,22 @@ static void s805_dma_process_completed ( void )
 		
 		if (!d->next) {
 
+			list_del(&d->elem);
+			
 			/* This implementation will make dma_cookie_status to report fake status when transactions are mixed. */
-			if (d->cyclic && d->vd.tx.next) {
-				
+			if (d->cyclic) {
+
 				dev_dbg(d->c->vc.chan.device->dev, "Period completed, calling cyclic callback for cookie %d.\n", d->vd.tx.cookie);
+				
+				root_cyclic = to_s805_dma_desc(d->cyclic);
 					
-				vchan_cyclic_callback(&d->vd);
-
-				/* For the user to preserve the right reference to the descriptor */
-				d->vd.tx.parent = d->vd.tx.next; 
-				d->vd.tx.next->parent = d->vd.tx.next;
-					
-				d->vd.tx.next->callback = d->vd.tx.callback;
-				d->vd.tx.next->callback_param = d->vd.tx.callback_param;
-
-				d->vd.tx.next->cookie = d->vd.tx.cookie;
-
+				vchan_cyclic_callback(&root_cyclic->vd);
+				
 				next_cyclic = to_s805_dma_desc(d->vd.tx.next);
 
 				if (d->c->status != DMA_PAUSED) {
 					
-					list_move_tail(&next_cyclic->elem, &mgr->in_progress);
+					list_add_tail(&next_cyclic->elem, &mgr->in_progress);
 					
 					next_cyclic->next = s805_dma_allocate_tr (thread,
 															  list_first_entry(&next_cyclic->desc_list, s805_dtable, elem),
@@ -1992,15 +1987,11 @@ static void s805_dma_process_completed ( void )
 					thread ++;
 
 				} else 
-					list_move_tail(&next_cyclic->elem, &mgr->scheduled);
-				
-				s805_dma_desc_free (&d->vd);
+					list_add_tail(&next_cyclic->elem, &mgr->scheduled);
 				
 			} else { 
 				
 				dev_dbg(d->c->vc.chan.device->dev, "Marking cookie %d completed.\n", d->vd.tx.cookie);
-
-				list_del(&d->elem);
 				
 				spin_lock(&d->c->vc.lock);
 				
@@ -2059,38 +2050,32 @@ static irqreturn_t s805_dma_callback (int irq, void *data)
 {
 
 	struct s805_dmadev * m = (struct s805_dmadev *) data;
+	
+	spin_lock(&m->lock);
 
-	/* 
-	   
-	   Will the preemption protection suffice here to ensure that we move the elements of the 
-	   "in_progress" queue to the "completed" queue in the same order IRQs arrive?
-	   so we can guarantee that "s805_dma_process_completed" is called only once for each batch
-	   of descriptors? Hints accepted ... ¬¬'.
-	
-	*/
-	
-	preempt_disable();
-	
-	list_move_tail (&list_first_entry(&m->in_progress,
-									  s805_dtable,
-									  elem)->elem,
-					&m->completed);
-
-	preempt_enable();
+	/* Check needed due to dmaengine_terminate_all() */
+	if(!list_empty(&m->in_progress)) {
+		
+		list_move_tail (&list_first_entry(&m->in_progress,
+										  s805_dtable,
+										  elem)->elem,
+						&m->completed);
+	}
 	
 	if (list_empty(&m->in_progress)) {
 		
-		spin_lock(&m->lock);
-		m->busy = false;
-	   
+		
+		m->busy = false;   
 		s805_dma_process_completed();	
-		spin_unlock(&m->lock);
+		
 	}
+	
+	spin_unlock(&m->lock);
 	
 	return IRQ_HANDLED;
 }
 
-/* Dismiss a previously scheduled descriptor */
+/* Dismiss a previously scheduled descriptor -- protected by mgr->lock */
 static void s805_dma_dismiss_chann ( struct s805_chan * c ) {
 
 	struct s805_desc * d, * tmp;
@@ -2098,9 +2083,30 @@ static void s805_dma_dismiss_chann ( struct s805_chan * c ) {
 	list_for_each_entry_safe (d, tmp, &mgr->scheduled, elem) {
 
 		if ( d->c == c )  {
-			
-			s805_dma_desc_free(&d->vd);
+
 			list_del(&d->elem);
+			s805_dma_desc_free(&d->vd);
+			
+		}
+	}
+
+	list_for_each_entry_safe (d, tmp, &mgr->in_progress, elem) {
+
+		if ( d->c == c )  {
+
+			list_del(&d->elem);
+			s805_dma_desc_free(&d->vd);
+			
+		}
+	}
+
+	list_for_each_entry_safe (d, tmp, &mgr->completed, elem) {
+
+		if ( d->c == c )  {
+
+			list_del(&d->elem);
+			s805_dma_desc_free(&d->vd);
+			
 		}
 	}
 
@@ -2227,6 +2233,36 @@ static int s805_dma_control (struct dma_chan *chan,
 }
 
 
+static u32 get_residue (struct s805_desc * d) {
+
+	struct dma_async_tx_descriptor * cursor = &d->vd.tx;
+	struct s805_desc * aux;
+	s805_dtable *desc;
+	u32 residue = 0;
+	
+	if (d->cyclic) {
+
+		/* Will count the prediods we lack till the end of the buffer. */
+		while (cursor != d->cyclic) {
+			
+			aux = to_s805_dma_desc(cursor);
+			
+			list_for_each_entry (desc, &aux->desc_list, elem)
+				residue += desc->table->count;
+			
+			cursor = cursor->next;
+		}
+		
+	} else {
+		
+		list_for_each_entry (desc, &d->desc_list, elem)
+			residue += desc->table->count;
+		
+	}
+	
+	return residue;
+}
+
 /*
   Bypass function for dma_tx_status (dmaengine interface)
   
@@ -2242,7 +2278,6 @@ enum dma_status s805_dma_tx_status(struct dma_chan *chan,
 	
 	enum dma_status ret;
 	struct s805_desc * d, * temp;
-	s805_dtable *desc;
 	u32 residue = 0;
 	
 	ret = dma_cookie_status(chan, cookie, txstate);
@@ -2251,13 +2286,17 @@ enum dma_status s805_dma_tx_status(struct dma_chan *chan,
 		return ret;
 	
 	/* Underprotected: to be tested! */
+	
 	list_for_each_entry_safe (d, temp, &mgr->scheduled, elem) {
 		
-		if (d->vd.tx.cookie == cookie) {
-			
-			list_for_each_entry (desc, &d->desc_list, elem)
-				residue += desc->table->count;
-		}
+		if (d->vd.tx.cookie == cookie) 
+			residue = get_residue (d);		
+	}
+	
+	list_for_each_entry_safe (d, temp, &mgr->in_progress, elem) {
+		
+		if (d->vd.tx.cookie == cookie) 
+			residue = get_residue (d);		
 	}
 	
 	dma_set_residue(txstate, residue);
