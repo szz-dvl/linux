@@ -40,6 +40,7 @@ config S805_DMAC
 	select DMA_ENGINE
 	select DMA_VIRTUAL_CHANNELS
 	select ASYNC_TX_DMA
+	select ASYNC_TX_ENABLE_CHANNEL_SWITCH
 	default y if MACH_MESON8B_ODROIDC
 	help
 	  This adds support for the Amlogic s805 Direct Memory Access Controller,
