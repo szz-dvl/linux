@@ -984,6 +984,8 @@ static s805_dtable * cyclic_def_init_new_tdesc (struct s805_chan *c,
 												dma_addr_t dst_addr,
 												enum dma_transfer_direction direction,
 												uint byte_count,
+												uint period_count,
+												bool addr_reset,
 												uint frames) {
 	
 	s805_dtable *desc_tbl = def_init_new_tdesc(c, frames);
@@ -1009,8 +1011,8 @@ static s805_dtable * cyclic_def_init_new_tdesc (struct s805_chan *c,
 		break;;
 	case DMA_MEM_TO_MEM:
 		{
-			desc_tbl->table->src = src_addr + (dma_addr_t) byte_count;
-			desc_tbl->table->dst = dst_addr + (dma_addr_t) byte_count;	
+			desc_tbl->table->src = src_addr + (dma_addr_t) (addr_reset ? byte_count : period_count);
+			desc_tbl->table->dst = dst_addr + (dma_addr_t) (addr_reset ? period_count : byte_count);	
 		}
 		break;;
 	case DMA_DEV_TO_DEV:
@@ -1043,8 +1045,13 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 	struct s805_desc *d;
 	dma_addr_t dst_addr, src_addr;
 	s805_dtable * desc_tbl, * temp;
-	unsigned int i, j, periods, next_bytes, byte_count = 0;
+	unsigned int i, j, periods, next_bytes, byte_count = 0, period_count = 0;
 	struct dma_async_tx_descriptor * root, * cursor, * parent;
+	bool addr_reset;
+	
+	/*
+	  DMA_MEM_TO_MEM: This direction is implemented only for test purposes, it is actually a non use case .
+	*/
 	
 	/* If user didn't issued dmaengine_slave_config return */
 	if ( (!c->cfg.src_addr && direction == DMA_DEV_TO_MEM) ||
@@ -1081,6 +1088,7 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 
 			if (!c->cfg.dst_addr) {
 				dst_addr = buf_addr;
+				addr_reset = false;
 				
 				if (c->cfg.src_addr)
 					src_addr = c->cfg.src_addr; 
@@ -1094,6 +1102,7 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 
 			if (!c->cfg.src_addr) {
 				src_addr = buf_addr;
+				addr_reset = true;
 				
 				if (c->cfg.dst_addr)
 					dst_addr = c->cfg.dst_addr;
@@ -1153,7 +1162,7 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 	cursor = root->next;
 	root->parent = root;
 	
-	desc_tbl = cyclic_def_init_new_tdesc(c, src_addr, dst_addr, direction, byte_count, d->frames);
+	desc_tbl = cyclic_def_init_new_tdesc(c, src_addr, dst_addr, direction, byte_count, period_count, addr_reset, d->frames);
 
 	if (!desc_tbl) {
 		
@@ -1183,7 +1192,7 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 				list_add_tail(&desc_tbl->elem, &d->desc_list);
 				d->frames ++;
 				
-				desc_tbl = cyclic_def_init_new_tdesc(c, src_addr, dst_addr, direction, byte_count, d->frames);
+				desc_tbl = cyclic_def_init_new_tdesc(c, src_addr, dst_addr, direction, byte_count, period_count, addr_reset, d->frames);
 				
 				if (!desc_tbl) 
 					goto error_list;
@@ -1192,6 +1201,7 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 			
 			desc_tbl->table->count += next_bytes;
 			byte_count += next_bytes;
+		    period_count += next_bytes;
 		}
 		
 		/* Ensure that the last descriptor of the period will interrupt us. */
@@ -1202,6 +1212,8 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 		
 		add_zeroed_tdesc(d);
 
+		period_count = 0;
+		
 		if (i < periods - 1) {
 
 			/* Allocate and setup the next descriptor. */
@@ -1221,7 +1233,7 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 			parent = cursor;
 			cursor = cursor->next; /* Must be NULL in first instance, so "error_list" tag must be correct. */
 			
-			desc_tbl = cyclic_def_init_new_tdesc(c, src_addr, dst_addr, direction, byte_count, d->frames);
+			desc_tbl = cyclic_def_init_new_tdesc(c, src_addr, dst_addr, direction, byte_count, period_count, addr_reset, d->frames);
 			
 			if (!desc_tbl) 
 				goto error_list;
