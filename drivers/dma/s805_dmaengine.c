@@ -1079,21 +1079,16 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 	case DMA_MEM_TO_MEM:
 	case DMA_DEV_TO_DEV:
 		{
-			/* Quick fix to treat all cases for buswidth errors */
-			if (c->cfg.dst_addr_width != c->cfg.src_addr_width) {
-				dev_err(chan->device->dev, "%s: Bad buswidth provided.", __func__);
-				return NULL;
-			} else
-				dev_width = c->cfg.dst_addr_width;
-
 			if (!c->cfg.dst_addr) {
 				dst_addr = buf_addr;
 				addr_reset = false;
 				
-				if (c->cfg.src_addr)
+				if (c->cfg.src_addr) {
+
 					src_addr = c->cfg.src_addr; 
-				
-				else {
+					dev_width = c->cfg.src_addr_width;
+					
+				} else {
 
 					dev_err(chan->device->dev, "%s: Missing source address.", __func__);
 					return NULL;
@@ -1104,10 +1099,12 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 				src_addr = buf_addr;
 				addr_reset = true;
 				
-				if (c->cfg.dst_addr)
+				if (c->cfg.dst_addr) {
+
 					dst_addr = c->cfg.dst_addr;
-				
-				else {
+					dev_width = c->cfg.dst_addr_width;
+					
+				} else {
 
 					dev_err(chan->device->dev, "%s: Missing destination address.", __func__);
 					return NULL;
@@ -1158,9 +1155,7 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 	INIT_LIST_HEAD(&d->desc_list);
 	
 	d->cyclic = root = vchan_tx_prep(&c->vc, &d->vd, flags);
-	parent = root;
-	cursor = root->next;
-	root->parent = root;
+	cursor = parent = root;
 	
 	desc_tbl = cyclic_def_init_new_tdesc(c, src_addr, dst_addr, direction, byte_count, period_count, addr_reset, d->frames);
 
@@ -1226,9 +1221,9 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 			INIT_LIST_HEAD(&d->desc_list);
 	
 			d->cyclic = root;
-			
-			cursor = vchan_tx_prep(&c->vc, &d->vd, flags);
-			cursor->parent = parent;
+
+			cursor->next = vchan_tx_prep(&c->vc, &d->vd, flags);
+			cursor->parent = parent; 
 			
 			parent = cursor;
 			cursor = cursor->next; /* Must be NULL in first instance, so "error_list" tag must be correct. */
@@ -1238,7 +1233,7 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 			if (!desc_tbl) 
 				goto error_list;
 		} else
-			cursor = root; /* Close the descriptor chain. */
+			cursor->next = root; /* Close the descriptor chain. */
 	}
 	
 	return root;
@@ -1352,7 +1347,9 @@ s805_dma_prep_sg (struct dma_chan *chan,
 		}
 
 		new_block = true;
-	   
+
+		/* Si las 2 terminan a la vez, una cabe pero la otra no casco, diria ... to be tested! */
+		
 		if (sg_ent_complete(&src_info)) {
 
 			icg = get_sg_icg(&src_info);
@@ -1924,7 +1921,7 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 		    mgr->busy = true;
 			
 		} else
-			s805_dma_thread_disable(thread); /* May be harmful for cyclic or "big" transactions */	
+		  	s805_dma_thread_disable(thread); /* May be harmful for cyclic or "big" transactions */	
 	}
 }
 
@@ -1975,16 +1972,16 @@ static void s805_dma_process_completed ( void )
 		/* All the transactions has been completed, process the finished descriptors.*/
 		
 		if (!d->next) {
-
+			
 			list_del(&d->elem);
 			
 			/* This implementation will make dma_cookie_status to report fake status when transactions are mixed. */
 			if (d->cyclic) {
-
+				
 				dev_dbg(d->c->vc.chan.device->dev, "Period completed, calling cyclic callback for cookie %d.\n", d->vd.tx.cookie);
 				
 				root_cyclic = to_s805_dma_desc(d->cyclic);
-					
+				
 				vchan_cyclic_callback(&root_cyclic->vd);
 				
 				next_cyclic = to_s805_dma_desc(d->vd.tx.next);
@@ -1995,7 +1992,7 @@ static void s805_dma_process_completed ( void )
 					
 					next_cyclic->next = s805_dma_allocate_tr (thread,
 															  list_first_entry(&next_cyclic->desc_list, s805_dtable, elem),
-															  d->frames);
+															  next_cyclic->frames);
 					thread ++;
 
 				} else 
@@ -2011,7 +2008,6 @@ static void s805_dma_process_completed ( void )
 				vchan_cookie_complete(&d->vd);
 				
 				spin_unlock(&d->c->vc.lock);
-				
 			}
 				
 		} else {
@@ -2036,16 +2032,16 @@ static void s805_dma_process_completed ( void )
 				list_move_tail(&d->elem, &mgr->scheduled);
 		}
 	}
-	
-	if (!mgr->busy) 
-		s805_dma_fetch_tr(thread);
-	
+
+   	s805_dma_fetch_tr(thread);
+
 	if (thread) {
 		
 		mgr->busy = true;
 		
-		for (idx = 0; idx < thread; idx ++)
+		for (idx = 0; idx < thread; idx ++) 
 			s805_dma_thread_enable(idx);
+		
 	}
 }
 
@@ -2220,15 +2216,6 @@ static int s805_dma_control (struct dma_chan *chan,
 			if ((cfg->direction == DMA_MEM_TO_DEV) &&
 				(cfg->dst_addr_width != DMA_SLAVE_BUSWIDTH_8_BYTES || !cfg->dst_addr)) 
 				{
-					return -EINVAL;
-				}
-				
-			/* If device to device (What exactly this means?? does it goes here??) we need both 32 bit addresses present */
-			if ((cfg->direction == DMA_DEV_TO_DEV) &&
-				(((cfg->dst_addr_width != DMA_SLAVE_BUSWIDTH_8_BYTES) || (cfg->src_addr_width != DMA_SLAVE_BUSWIDTH_8_BYTES)) ||
-				 (!cfg->dst_addr || !cfg->src_addr)))
-				{
-					
 					return -EINVAL;
 				}
 			
