@@ -4,7 +4,6 @@
 #include <linux/printk.h>
 #include <linux/dmaengine.h>
 #include <linux/dma-mapping.h>
-#include <linux/dmapool.h>
 #include <linux/err.h>
 #include <linux/init.h>
 #include <linux/list.h>
@@ -13,21 +12,16 @@
 #include <linux/spinlock.h>
 #include <linux/of.h>
 #include <linux/delay.h>
-#include <linux/kernel.h>
 #include <linux/interrupt.h>
 #include <linux/preempt.h>
 #include <linux/s805_dmac.h>
 
-
-#define WR(data, addr)  *(volatile unsigned long *)(addr)=data
-#define RD(addr)        *(volatile unsigned long *)(addr)
 
 #define S805_DMA_IRQ                     68
 #define LOWER_32                         0x00000000FFFFFFFF
 
 /* Registers & Bitmaps for the s805 DMAC */
 
-#define S805_DMA_MAX_DESC                127
 #define S805_DMA_MAX_THREAD              4
 #define S805_DMA_NULL_COOKIE             0
 #define S805_DMA_MAX_BURST               0xFFFF
@@ -50,16 +44,13 @@
 #define S805_DMA_ENABLE                  BIT(14)                 /* Both CTRL and CLK resides in the same bit */  
 
 #define S805_DTBL_ADD_DESC               P_NDMA_TABLE_ADD_REG
-#define S805_DMA_ADD_DESC(ch, cnt)       (((ch & 0x3) << 8) | (cnt & 0xff))
+#define S805_DMA_ADD_DESC(th, cnt)       (((th & 0x3) << 8) | (cnt & 0xff))
 
-#define S805_DMA_THREAD_INIT(ch)         (1 << (24 + ch))
-#define S805_DMA_THREAD_ENABLE(ch)       (1 << (8 + ch))
+#define S805_DMA_THREAD_INIT(th)         (1 << (24 + th))
+#define S805_DMA_THREAD_ENABLE(th)       (1 << (8 + th))
 
-#define S805_DTBL_PRE_ENDIAN             ((0x000 & 0x7) << 27)  /* Fixed Pre Endian type */
 #define S805_DTBL_SRC_HOLD               BIT(26) 
 #define S805_DTBL_DST_HOLD               BIT(25)
-#define S805_DTBL_INLINE_TYPE(type)      ((type & 0x7) << 22)
-#define S805_DTBL_IRQ                    BIT(21)
 #define S805_DTBL_NO_BREAK               BIT(8)                
 
 struct s805_dmadev 
@@ -84,21 +75,6 @@ struct memset_info {
 	dma_addr_t paddr;
 };
 
-typedef struct s805_chan {
-	
-	struct virt_dma_chan vc;
-
-	/* Channel configuration, needed for slave_sg and cyclic transfers. */
-	struct dma_slave_config cfg;
-
-	/* Status of the channel either DMA_PAUSE or DMA_IN_PROGRESS, DMA_SUCCESS if inactive channel. */
-	enum dma_status status;        	
-
-	/* DMA pool. */
-	struct dma_pool *pool;        
-	
-} s805_chan;
-
 /* Auxiliar structure for dma_sg */
 struct sg_info {
 
@@ -119,19 +95,13 @@ static const struct of_device_id s805_dma_of_match[] =
 	};
 MODULE_DEVICE_TABLE(of, s805_dma_of_match);
 
-static inline struct s805_chan *to_s805_dma_chan(struct dma_chan *c)
-{
-	return container_of(c, struct s805_chan, vc.chan);
-}
-
-
 /* 
    
    Adds a zeroed descriptor at the end of the current list, if possible. 
    To detect the end of the transaction. 
    
 */
-static void add_zeroed_tdesc (struct s805_desc * d)
+void add_zeroed_tdesc (struct s805_desc * d)
 {
 	
 	s805_dtable * desc_tbl = kzalloc(sizeof(s805_dtable), GFP_NOWAIT);
@@ -173,8 +143,8 @@ static s805_dtable * def_init_new_tdesc (struct s805_chan * c, unsigned int fram
 		*desc_tbl->table = (struct s805_table_desc) { 0 };
 	
 	/* Control common part */
-	desc_tbl->table->control |= S805_DTBL_PRE_ENDIAN;
-	desc_tbl->table->control |= S805_DTBL_INLINE_TYPE(INLINE_NORMAL); /* To Do: Add support for crypto types */
+	desc_tbl->table->control |= S805_DTBL_PRE_ENDIAN(ENDIAN_NO_CHANGE);
+	desc_tbl->table->control |= S805_DTBL_INLINE_TYPE(INLINE_NORMAL);
 
 	/* desc_tbl->table->control |= S805_DTBL_NO_BREAK;                   
 	   
@@ -210,7 +180,7 @@ static s805_dtable * def_init_new_tdesc (struct s805_chan * c, unsigned int fram
 
 /* Auxiliar functions for DMA_SG: */
 
-static inline void fwd_sg (struct sg_info * info) {
+inline void fwd_sg (struct sg_info * info) {
 
 	if (info->cursor) {
 		
@@ -227,7 +197,7 @@ static inline void fwd_sg (struct sg_info * info) {
 			
 }
 
-static int get_sg_icg (struct sg_info * info) {
+int get_sg_icg (struct sg_info * info) {
 
 	/* 
 	   Notice the integer return type, since we don't know if information will be arranged sequentially in memory. 
@@ -240,7 +210,7 @@ static int get_sg_icg (struct sg_info * info) {
 		return -1;
 }
 
-static uint get_sg_remain (struct sg_info * info) {
+uint get_sg_remain (struct sg_info * info) {
 	
 	if (info->cursor)
 		return sg_dma_len(info->cursor) - info->bytes;
@@ -248,7 +218,7 @@ static uint get_sg_remain (struct sg_info * info) {
 		return UINT_MAX; /* For convenience in dma_sg */
 }
 
-static s805_dtable * move_along (s805_dtable * cursor, struct s805_desc *d) {
+s805_dtable * move_along (s805_dtable * cursor, struct s805_desc *d) {
 	
 	list_add_tail(&cursor->elem, &d->desc_list);
 	d->frames ++;

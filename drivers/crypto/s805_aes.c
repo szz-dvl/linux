@@ -5,20 +5,108 @@
 #include <crypto/algapi.h>
 #include <linux/s805_dmac.h>
 
+
+/* Registers & Bitmaps for the s805 DMAC AES algorithm. */
+
+#define S805_AES_KEY_0       P_NDMA_AES_KEY_0
+#define S805_AES_KEY_1       P_NDMA_AES_KEY_1
+#define S805_AES_KEY_2       P_NDMA_AES_KEY_2
+#define S805_AES_KEY_3       P_NDMA_AES_KEY_3
+#define S805_AES_KEY_4       P_NDMA_AES_KEY_4
+#define S805_AES_KEY_5       P_NDMA_AES_KEY_5
+#define S805_AES_KEY_6       P_NDMA_AES_KEY_6
+#define S805_AES_KEY_7       P_NDMA_AES_KEY_7
+
+#define S805_DTBL_AES_POST_ENDIAN(type)       ((type & 0xf) << 4)
+#define S805_DTBL_AES_PRE_ENDIAN(type)        (type & 0xf)
+#define S805_DTBL_AES_KEY_TYPE(type)          ((type & 0x3) << 8)
+#define S805_DTBL_AES_DIR(dir)                ((dir & 0x1) << 10)
+#define S805_DTBL_AES_RESET_IV(restr)         ((restr & 0x1) << 11)
+#define S805_DTBL_AES_MODE(mode)              ((mode & 0x3) << 12)
+
+typedef enum aes_key_type {
+	AES_KEY_TYPE_128,
+	AES_KEY_TYPE_192,
+	AES_KEY_TYPE_256,
+	AES_KEY_TYPE_RESERVED,
+} s805_aes_key_type;
+
+typedef enum aes_mode {
+	AES_MODE_ECB,
+    AES_MODE_CBC,
+	AES_MODE_CTR,
+	AES_MODE_RESERVED,
+} s805_aes_mode;
+
+typedef enum aes_dir {
+	AES_DIR_DECRYPT,
+    AES_DIR_ENCRYPT
+} s805_aes_dir;
+
 struct s805_crypto_mgr {
 
 	struct device * dev;
-	
-	int keylen;
-	u32 key[AES_KEYSIZE_256 / sizeof(u32)];
+    struct s805_chan * chan;
 	
 };
 
 struct s805_crypto_mgr * mgr;
 
+struct s805_aes_ctx {
+
+	int		keylen;
+	u32		key[AES_KEYSIZE_256 / sizeof(u32)];
+
+	//u16		block_size;
+};
+
+static const struct of_device_id s805_aes_of_match[] =
+{
+    {.compatible = "aml,amls805-aes"},
+    {},
+};
+
+/* Auxiliar function to initialize descriptors. */
+static s805_dtable * def_init_aes_tdesc (unsigned int frames, s805_aes_key_type type, s805_aes_mode mode, s805_aes_dir dir)
+{
+	
+	s805_dtable * desc_tbl = kzalloc(sizeof(s805_dtable), GFP_NOWAIT);
+	
+	if (!desc_tbl) 
+	    return NULL;
+	
+	desc_tbl->table = dma_pool_alloc(mgr->c->pool, GFP_NOWAIT | __GFP_ZERO, &desc_tbl->paddr); /* __GFP_ZERO: Not Working. */
+	
+	if (!desc_tbl->table) {
+		
+		kfree(desc_tbl);
+		return NULL;
+		
+	} else
+		*desc_tbl->table = (struct s805_table_desc) { 0 };
+	
+	/* Control common part */
+	desc_tbl->table->control |= S805_DTBL_PRE_ENDIAN(ENDIAN_NO_CHANGE);
+	desc_tbl->table->control |= S805_DTBL_INLINE_TYPE(INLINE_AES);
+
+	if (!((frames + 1) % S805_DMA_MAX_DESC))
+		desc_tbl->table->control |= S805_DTBL_IRQ;
+
+	/* Crypto block */
+	desc_tbl->table->crypto |= S805_DTBL_AES_POST_ENDIAN(ENDIAN_NO_CHANGE);
+	desc_tbl->table->crypto |= S805_DTBL_AES_PRE_ENDIAN(ENDIAN_NO_CHANGE);
+	desc_tbl->table->crypto |= S805_DTBL_AES_KEY_TYPE(type);
+	desc_tbl->table->crypto |= S805_DTBL_AES_DIR(dir);
+	desc_tbl->table->crypto |= S805_DTBL_AES_RESET_IV(frames ? 0 : 1); /* To be tested! */
+	desc_tbl->table->crypto |= S805_DTBL_AES_MODE(mode);
+	
+	return desc_tbl;
+	
+}
+
 static int s805_aes_cra_init(struct crypto_tfm *tfm)
 {
-	//tfm->crt_ablkcipher.reqsize = sizeof(struct atmel_aes_reqctx);
+	//tfm->crt_ablkcipher.reqsize = sizeof(struct s805_aes_reqctx); /* ?? */
 
 	return 0;
 }
@@ -27,10 +115,29 @@ static void s805_aes_cra_exit(struct crypto_tfm *tfm)
 {
 }
 
+static inline void s805_aes_cpykey_to_hw (const unsigned long * key, unsigned int keylen) {
+	
+	WR(key[0], S805_AES_KEY_0);
+	WR(key[1], S805_AES_KEY_1);
+	WR(key[2], S805_AES_KEY_2);
+	WR(key[3], S805_AES_KEY_3);
+
+	switch (keylen) {
+	case AES_KEYSIZE_192:
+		WR(key[4], S805_AES_KEY_4);
+		WR(key[5], S805_AES_KEY_5);
+	case AES_KEYSIZE_256:
+		WR(key[6], S805_AES_KEY_6);
+		WR(key[7], S805_AES_KEY_7);
+	default:
+		return;
+	}
+
+}
 static int s805_aes_setkey(struct crypto_ablkcipher *tfm, const u8 *key,
 						   unsigned int keylen)
 {
-	struct s805_crypto_mgr *ctx = crypto_ablkcipher_ctx(tfm);
+	struct s805_aes_ctx *ctx = crypto_ablkcipher_ctx(tfm);
 
 	switch (keylen) {
 	case AES_KEYSIZE_128:
@@ -38,6 +145,7 @@ static int s805_aes_setkey(struct crypto_ablkcipher *tfm, const u8 *key,
 	case AES_KEYSIZE_256:
 		memcpy(ctx->key, key, keylen);
 		ctx->keylen = keylen;
+		s805_aes_cpykey_to_hw ( (const unsigned long *)key, keylen );
 		return 0;
 	default:
 		crypto_ablkcipher_set_flags(tfm, CRYPTO_TFM_RES_BAD_KEY_LEN);
@@ -90,7 +198,7 @@ static struct crypto_alg s805_aes_algs[] = {
 	.cra_priority		= 100,
 	.cra_flags		    = CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC,
 	.cra_blocksize		= AES_BLOCK_SIZE,
-	.cra_ctxsize		= sizeof(struct s805_crypto_mgr),
+	.cra_ctxsize		= sizeof(struct s805_aes_ctx),
 	.cra_alignmask		= 0,
 	.cra_type		    = &crypto_ablkcipher_type,
 	.cra_module		    = THIS_MODULE,
@@ -110,7 +218,7 @@ static struct crypto_alg s805_aes_algs[] = {
 	.cra_priority		= 100,
 	.cra_flags		    = CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC,
 	.cra_blocksize		= AES_BLOCK_SIZE,
-	.cra_ctxsize		= sizeof(struct s805_crypto_mgr),
+	.cra_ctxsize		= sizeof(struct s805_aes_ctx),
 	.cra_alignmask		= 0,
 	.cra_type		    = &crypto_ablkcipher_type,
 	.cra_module		    = THIS_MODULE,
@@ -131,7 +239,7 @@ static struct crypto_alg s805_aes_algs[] = {
 	.cra_priority		= 100,
 	.cra_flags		    = CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC,
 	.cra_blocksize		= AES_BLOCK_SIZE,
-	.cra_ctxsize		= sizeof(struct s805_crypto_mgr),
+	.cra_ctxsize		= sizeof(struct s805_aes_ctx),
 	.cra_alignmask		= 0,
 	.cra_type		    = &crypto_ablkcipher_type,
 	.cra_module		    = THIS_MODULE,
@@ -171,6 +279,8 @@ static int s805_aes_probe(struct platform_device *pdev)
 {
 
 	int err;
+	static dma_cap_mask_t mask;
+	struct dma_chan * chan;
 	
     mgr = kzalloc(sizeof(struct s805_crypto_mgr), GFP_KERNEL);
 	if (!mgr) {
@@ -179,10 +289,29 @@ static int s805_aes_probe(struct platform_device *pdev)
 	}
 
     mgr->dev = &pdev->dev;
+
+	dma_cap_zero(mask);
+	dma_cap_set(DMA_INTERRUPT, mask);
+	
+    chan = dma_request_channel ( mask, NULL, NULL );
+
+	if (!chan) {
+
+		dev_err(mgr->dev, "s805 AES: failed to get dma channel.\n");
+		kfree(mgr);
+		return -ENOSYS;
+		
+	} else {
+		
+		dev_info(mgr->dev, "s805 AES: grabbed dma channel (%s).\n", dma_chan_name(chan));
+		mgr->chan = to_s805_dma_chan(chan);
+	}
 	
 	err = s805_aes_register_algs();
 	
 	if (err) {
+		
+		dev_err(mgr->dev, "s805 AES: failed to register algorithms.\n");
 		kfree(mgr);
 		return err;
 	}
@@ -194,7 +323,8 @@ static int s805_aes_probe(struct platform_device *pdev)
 
 static int s805_aes_remove(struct platform_device *pdev)
 {
-
+	
+	dma_release_channel ( mgr->chan.vc.chan );
 	kfree(mgr);
 
 	return 0;
@@ -206,6 +336,7 @@ static struct platform_driver s805_aes_driver = {
 	.driver		= {
 		.name	= "s805_crypto_aes",
 		.owner	= THIS_MODULE,
+		.of_match_table = s805_aes_of_match
 	},
 };
 

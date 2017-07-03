@@ -74,7 +74,6 @@
         #address-cells = <0>;
     };
 	
-	/* Add suuport for channel switching here? */
 	dma: dma@0xda006000 {
 		compatible = "aml,amls805-dma";
 		reg = <0xda006000 0x2000>;
@@ -82,6 +81,11 @@
 		aml,dma-channel-num = <4>; /* Amount of channels that will be offered under /sys/class/dma/, read more about this under "Documentation" */
 	};
 
+	s805-aes {
+		compatible = "aml,amls805-aes";
+		status= "ok";
+	};
+	
    meson-rng {
         compatible = "amlogic,meson-rng";
         status = "ok";
