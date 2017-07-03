@@ -1,5 +1,6 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/platform_device.h>
 #include <linux/printk.h>
 #include <linux/dmaengine.h>
 #include <linux/dma-mapping.h>
@@ -9,23 +10,14 @@
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/slab.h>
-//#include <linux/io.h>
 #include <linux/spinlock.h>
 #include <linux/of.h>
-//#include <linux/of_dma.h>
-#include <linux/of_irq.h>
-#include <linux/platform_device.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
-#include <linux/kthread.h>
 #include <linux/interrupt.h>
 #include <linux/preempt.h>
+#include <linux/s805_dmac.h>
 
-/* #include <linux/irqflags.h> */
-
-#include "virt-dma.h"
-
-#include <mach/am_regs.h>
 
 #define WR(data, addr)  *(volatile unsigned long *)(addr)=data
 #define RD(addr)        *(volatile unsigned long *)(addr)
@@ -45,52 +37,30 @@
 #define S805_DMA_CTRL                    P_NDMA_CNTL_REG0
 #define S805_DMA_THREAD_CTRL             P_NDMA_THREAD_REG
 #define S805_DMA_CLK                     P_HHI_GCLK_MPEG1
-#define S805_DMA_CURR_THREAD             BIT(12) | BIT(13)
-#define S805_DMA_ACTIVE_THREAD           ( ( RD(S805_DMA_THREAD_CTRL) & (S805_DMA_CURR_THREAD) ) >> 12 ) 
 
 #define S805_DMA_DLST_STR0               P_NDMA_THREAD_TABLE_START0
-#define S805_DMA_DLST_CURR0              P_NDMA_THREAD_TABLE_CURR0
 #define S805_DMA_DLST_END0               P_NDMA_THREAD_TABLE_END0
 #define S805_DMA_DLST_STR1               P_NDMA_THREAD_TABLE_START1
-#define S805_DMA_DLST_CURR1              P_NDMA_THREAD_TABLE_CURR1
 #define S805_DMA_DLST_END1               P_NDMA_THREAD_TABLE_END1
 #define S805_DMA_DLST_STR2               P_NDMA_THREAD_TABLE_START2
-#define S805_DMA_DLST_CURR2              P_NDMA_THREAD_TABLE_CURR2
 #define S805_DMA_DLST_END2               P_NDMA_THREAD_TABLE_END2
 #define S805_DMA_DLST_STR3               P_NDMA_THREAD_TABLE_START3
-#define S805_DMA_DLST_CURR3              P_NDMA_THREAD_TABLE_CURR3
 #define S805_DMA_DLST_END3               P_NDMA_THREAD_TABLE_END3
 
 #define S805_DMA_ENABLE                  BIT(14)                 /* Both CTRL and CLK resides in the same bit */  
 
 #define S805_DTBL_ADD_DESC               P_NDMA_TABLE_ADD_REG
-#define S805_DMA_MAGIC_REG               0x2271
-#define S805_DMA_MAGIC                   CBUS_REG_ADDR(S805_DMA_MAGIC_REG)
-#define S805_DMA_MAGIC_CLEAR             0x00000001
 #define S805_DMA_ADD_DESC(ch, cnt)       (((ch & 0x3) << 8) | (cnt & 0xff))
-#define S805_DMA_DESC_CNT                0xFF
 
 #define S805_DMA_THREAD_INIT(ch)         (1 << (24 + ch))
 #define S805_DMA_THREAD_ENABLE(ch)       (1 << (8 + ch))
-#define S805_DMA_THREAD_START(ch)        S805_DMA_THREAD_ENABLE(ch) | S805_DMA_THREAD_INIT(ch)
 
-#define S805_DTBL_OWNER_ID(ch)           ((ch & 0x3) << 30)
 #define S805_DTBL_PRE_ENDIAN             ((0x000 & 0x7) << 27)  /* Fixed Pre Endian type */
 #define S805_DTBL_SRC_HOLD               BIT(26) 
 #define S805_DTBL_DST_HOLD               BIT(25)
 #define S805_DTBL_INLINE_TYPE(type)      ((type & 0x7) << 22)
 #define S805_DTBL_IRQ                    BIT(21)
 #define S805_DTBL_NO_BREAK               BIT(8)                
-#define S805_DTBL_TSC(tsc)               (tsc & 0xFF)           /* Unused by now */
-
-/* We will need this in "dmaengine.h" in order to support crypto transactions. Don't know exactly how I will arrange crypto into linux yet ... */
-typedef enum inline_types {
-	INLINE_NORMAL,
-	INLINE_TDES,
-	INLINE_DIVX,
-	INLINE_CRC,
-	INLINE_AES
-} s805_dma_tr_type;
 
 struct s805_dmadev 
 {
@@ -108,63 +78,10 @@ struct s805_dmadev
 	bool busy;	
 };
 
-/* S805 Datasheet p.57 */
-struct s805_table_desc 
-{
-	u32 control;        /* entry 0 */
-	u32 src;            /* entry 1 */
-	u32 dst;            /* entry 2 */
-	u32 count;          /* entry 3 */
-	
-	/* 2D Move */
-	u16 src_burst;      /* entry 4 [15:0]  */
-	u16 src_skip;       /* entry 4 [31:16] */
-	
-	u16 dst_burst;      /* entry 5 [15:0]  */
-	u16 dst_skip;       /* entry 5 [31:16] */
-	
-	
-	/* Crypto engine */
-	u32 crypto;         /* entry 6 */
-	
-} __attribute__ ((aligned (32)));
-
-
-typedef struct s805_table_desc_entry {
-
-	struct list_head elem;
-	struct s805_table_desc * table;
-	dma_addr_t paddr;
-
-} s805_dtable;
-
 struct memset_info {
 
 	long long * value;
 	dma_addr_t paddr;
-};
-
-struct s805_desc {
-	
-	struct s805_chan *c;
-	struct virt_dma_desc vd;
-	struct list_head elem;
-	
-	/* List of table descriptors holding the information of the trasaction */
-	struct list_head desc_list;
-	
-	/* Descriptors pending of process */
-	unsigned int frames;
-
-	/* Struct to store the information for memset source value */
-	struct memset_info * memset;
-
-	/* For transactions with more than S805_DMA_MAX_DESC data chunks. */
-	s805_dtable * next;
-
-	/* Boolean to mark transactions as terminated. */
-    bool terminated;
-	
 };
 
 typedef struct s805_chan {
@@ -207,10 +124,6 @@ static inline struct s805_chan *to_s805_dma_chan(struct dma_chan *c)
 	return container_of(c, struct s805_chan, vc.chan);
 }
 
-static inline struct s805_desc *to_s805_dma_desc(struct dma_async_tx_descriptor *t)
-{
-	return container_of(t, struct s805_desc, vd.tx);
-}
 
 /* 
    
@@ -2602,5 +2515,5 @@ module_exit(s805_exit);
 
 MODULE_ALIAS("platform:s805-dmaengine");
 MODULE_DESCRIPTION("Amlogic S805 dmaengine driver");
-MODULE_AUTHOR("szz-dvl <such-a-mistake@gmail.com>");
+MODULE_AUTHOR("szz-dvl");
 MODULE_LICENSE("GPL v2");

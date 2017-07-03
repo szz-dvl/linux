@@ -10,6 +10,18 @@ menuconfig CRYPTO_HW
 
 if CRYPTO_HW
 
+config CRYPTO_DEV_S805_AES
+	tristate "Amlogic s805 DMAC driver for AES algorithm."
+	depends on S805_DMAC
+	default y if S805_DMAC
+	help
+	  This option will add support for s805 Amlogic AES crypto engine,
+	  this driver was developed for Odroid C1+, if other board is being used 
+	  malfunction can occur.
+	  
+	  The driver is being developed at this moment, so say Y if
+	  you want to lend a hand, otherwise say N.
+	  
 config CRYPTO_DEV_PADLOCK
 	tristate "Support for VIA PadLock ACE"
 	depends on X86 && !UML
