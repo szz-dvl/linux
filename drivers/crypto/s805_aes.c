@@ -31,7 +31,7 @@
 #define S805_DTBL_AES_RESET_IV(restr)         ((restr & 0x1) << 11)
 #define S805_DTBL_AES_MODE(mode)              ((mode & 0x3) << 12)
 
-struct s805_crypto_mgr {
+struct s805_aes_mgr {
 
 	struct device * dev;
     struct s805_chan * chan;
@@ -41,7 +41,7 @@ struct s805_crypto_mgr {
 	bool busy;
 };
 
-struct s805_crypto_mgr * mgr;
+struct s805_aes_mgr * aes_mgr;
 
 struct s805_aes_ctx {
 
@@ -74,7 +74,7 @@ static s805_dtable * def_init_aes_tdesc (unsigned int frames, s805_aes_key_type 
 	if (!desc_tbl) 
 	    return NULL;
 	
-	desc_tbl->table = dma_pool_alloc(mgr->chan->pool, GFP_NOWAIT | __GFP_ZERO, &desc_tbl->paddr); /* __GFP_ZERO: Not Working. */
+	desc_tbl->table = dma_pool_alloc(aes_mgr->chan->pool, GFP_NOWAIT | __GFP_ZERO, &desc_tbl->paddr); /* __GFP_ZERO: Not Working. */
 	
 	if (!desc_tbl->table) {
 		
@@ -134,9 +134,9 @@ static int s805_aes_iv_gen (struct skcipher_givcrypt_request * skreq) {
 
 	u32 * aux;
 
-	spin_lock(&mgr->lock);
-	if (!mgr->busy) {
-		spin_unlock(&mgr->lock);
+	spin_lock(&aes_mgr->lock);
+	if (!aes_mgr->busy) {
+		spin_unlock(&aes_mgr->lock);
 
 		get_random_bytes (skreq->giv, AES_BLOCK_SIZE);
 
@@ -151,8 +151,8 @@ static int s805_aes_iv_gen (struct skcipher_givcrypt_request * skreq) {
 		
 	} else {
 
-		spin_unlock(&mgr->lock);
-		dev_err(mgr->dev, "%s: s805 AES engine is busy, please wait till all the pending jobs finish.\n", __func__);
+		spin_unlock(&aes_mgr->lock);
+		dev_err(aes_mgr->dev, "%s: s805 AES engine is busy, please wait till all the pending jobs finish.\n", __func__);
 
 		return -ENOSYS;
 	}
@@ -203,32 +203,35 @@ static int s805_aes_setkey(struct crypto_ablkcipher *tfm, const u8 *key,
 	} else
 		spin_unlock(&ctx->lock);
 
-	dev_err(mgr->dev, "%s: s805 AES engine is busy, please wait till all the pending jobs (%u) finish.\n", __func__, ctx->pending);
+	dev_err(aes_mgr->dev, "%s: s805 AES engine is busy, please wait till all the pending jobs (%u) finish.\n", __func__, ctx->pending);
 	return -ENOSYS;
 }
 
-static int s805_aes_crypt_launch_job (struct dma_async_tx_descriptor * tx_desc, struct s805_aes_ctx *ctx) {
+static int s805_aes_crypt_launch_job (struct s805_aes_job * job) {
 
 	dma_cookie_t tx_cookie;
 
-	spin_lock(&mgr->lock);
-	mgr->busy = true;
-	spin_unlock(&mgr->lock);
+	spin_lock(&aes_mgr->lock);
+	if (!aes_mgr->busy) {
+		aes_mgr->busy = true;
+		spin_unlock(&aes_mgr->lock);
 	
-	s805_aes_cpykey_to_hw ((const u32 *) ctx->key, ctx->keylen);
-
-    tx_cookie = dmaengine_submit(tx_desc);
-	
-	if(tx_cookie < 0) {
-
-		dev_err(mgr->dev, "%s: Failed to get cookie.\n", __func__);
-		return tx_cookie;
+		s805_aes_cpykey_to_hw ((const u32 *) job->ctx->key, job->ctx->keylen);
 		
+		tx_cookie = dmaengine_submit(job->tx_desc);
+		
+		if(tx_cookie < 0) {
+			
+			dev_err(aes_mgr->dev, "%s: Failed to get cookie.\n", __func__);
+			return tx_cookie;
+			
+		}
+		
+		dma_async_issue_pending(&aes_mgr->chan->vc.chan);
+		return 0;
 	}
-
-	dma_async_issue_pending(&mgr->chan->vc.chan);
-
-	return 0;
+	
+	return 1;
 	
 }
 
@@ -243,56 +246,49 @@ static void s805_aes_crypt_handle_completion (void * req_ptr) {
 	spin_unlock(&ctx->lock);
 
 	req->base.complete(&req->base, 0);
-
-	spin_lock(&mgr->lock);
-
-	if (!list_empty_careful(&mgr->jobs))
-		list_del(&list_first_entry (&mgr->jobs, struct s805_aes_job, elem)->elem);
 	
-	job = list_first_entry_or_null (&mgr->jobs, struct s805_aes_job, elem);
+	spin_lock(&aes_mgr->lock);
+	
+	job = list_first_entry (&aes_mgr->jobs, struct s805_aes_job, elem);
+	list_del(&job->elem);
+	
+	spin_unlock(&aes_mgr->lock);
+
+	kfree(job);
+	
+	job = list_first_entry_or_null (&aes_mgr->jobs, struct s805_aes_job, elem);
 
 	if (job)  
-		s805_aes_crypt_launch_job(job->tx_desc, job->ctx);
-	else
-		mgr->busy = false;
+		s805_aes_crypt_launch_job(job);
+	else {
+		spin_lock(&aes_mgr->lock);
+		aes_mgr->busy = false;
+		spin_unlock(&aes_mgr->lock);
+	}
 	
-	spin_unlock(&mgr->lock);
 }
 
 static int s805_aes_crypt_schedule_job (struct dma_async_tx_descriptor * tx_desc, struct s805_aes_ctx *ctx) {
 
-	struct s805_aes_job * job;
+	struct s805_aes_job * job = kzalloc(sizeof(struct s805_aes_job), GFP_NOWAIT);
 
+	if (!job) 	
+		return -ENOMEM;
+	
 	spin_lock(&ctx->lock);
 	ctx->pending ++;
 	spin_unlock(&ctx->lock);
 	
-	if (list_empty_careful(&mgr->jobs))
-		return s805_aes_crypt_launch_job ( tx_desc, ctx );
-	else {
-
-		spin_lock(&mgr->lock);
+	job->tx_desc = tx_desc;
+	job->ctx = ctx;
+	
+	spin_lock(&aes_mgr->lock);
+	
+	list_add_tail(&job->elem, &aes_mgr->jobs);
+	
+	spin_unlock(&aes_mgr->lock);
 		
-		job = kzalloc(sizeof(struct s805_aes_job), GFP_NOWAIT);
-
-		if (!job) {
-
-			spin_lock(&ctx->lock);
-			ctx->pending ++;
-			spin_unlock(&ctx->lock);
-
-			return -ENOMEM;
-		}
-		
-		job->tx_desc = tx_desc;
-		job->ctx = ctx;
-		
-		list_add_tail(&job->elem, &mgr->jobs);
-		
-		spin_unlock(&mgr->lock);
-	}
-
-	return 0;
+	return s805_aes_crypt_launch_job(job);
 }
 
 static int s805_aes_crypt_get_key_type (uint keylen) {
@@ -316,14 +312,14 @@ static int s805_aes_crypt_prep (struct ablkcipher_request *req, s805_aes_mode mo
 	struct scatterlist * aux;
 	s805_init_desc * init_nfo;
 	int keytype;
-	int len, j = 0, bytes = 0;
+	int len, j = 0;
 	
 	
 	/* Allocate and setup the information for descriptor initialization */
 	init_nfo = kzalloc(sizeof(struct s805_desc), GFP_NOWAIT); /* May we do this with GFP_KERNEL?? */
 
 	if (!init_nfo) {
-	    dev_err(mgr->dev, "%s: Failed to allocate initialization info structure.\n", __func__);
+	    dev_err(aes_mgr->dev, "%s: Failed to allocate initialization info structure.\n", __func__);
 		return -ENOMEM;
 	}
 
@@ -331,7 +327,7 @@ static int s805_aes_crypt_prep (struct ablkcipher_request *req, s805_aes_mode mo
 
 	if (keytype < 0) {
 		
-		dev_err(mgr->dev, "%s: Failed to get key type.\n", __func__);
+		dev_err(aes_mgr->dev, "%s: Failed to get key type.\n", __func__);
 		return keytype;
 		
 	}
@@ -348,28 +344,20 @@ static int s805_aes_crypt_prep (struct ablkcipher_request *req, s805_aes_mode mo
 		len = sg_dma_len(aux);
 		
 		if (!IS_ALIGNED(len, AES_BLOCK_SIZE)) {
-		    dev_err(mgr->dev, "%s: Block %d of src sg list is not aligned with AES_BLOCK_SIZE.\n", __func__, j);
+		    dev_err(aes_mgr->dev, "%s: Block %d of src sg list is not aligned with AES_BLOCK_SIZE.\n", __func__, j);
 			kfree(init_nfo);
 			return -EINVAL;
 		}
 		
-		bytes += len;
 		aux = sg_next(aux);
 		j ++;
 	}
 	
-	if (bytes != 0) { 
-		
-		dev_err(mgr->dev, "%s: Length for destination and source sg lists differ.\n", __func__);
-		kfree(init_nfo);
-	    return -EINVAL;
-	}
-	
-	tx_desc = s805_scatterwalk (mgr->chan, req->src, req->dst, init_nfo, 0);
+	tx_desc = s805_scatterwalk (aes_mgr->chan, req->src, req->dst, init_nfo, 0);
 
 	if (!tx_desc) {
 		
-		dev_err(mgr->dev, "%s: Failed to allocate dma descriptor.\n", __func__);
+		dev_err(aes_mgr->dev, "%s: Failed to allocate dma descriptor.\n", __func__);
 		kfree(init_nfo);
 		return -ENOMEM;
 	}
@@ -432,6 +420,7 @@ static struct crypto_alg s805_aes_algs[] = {
 	.cra_u.ablkcipher   = {
 		.min_keysize	     = AES_MIN_KEY_SIZE,
 		.max_keysize	     = AES_MAX_KEY_SIZE,
+		.ivsize		         = AES_BLOCK_SIZE,
 		.setkey		         = s805_aes_setkey,
 		.encrypt	         = s805_aes_ecb_encrypt,
 		.decrypt	         = s805_aes_ecb_decrypt,
@@ -513,16 +502,16 @@ static int s805_aes_probe(struct platform_device *pdev)
 	static dma_cap_mask_t mask;
 	struct dma_chan * chan;
 	
-    mgr = kzalloc(sizeof(struct s805_crypto_mgr), GFP_KERNEL);
-	if (!mgr) {
+    aes_mgr = kzalloc(sizeof(struct s805_aes_mgr), GFP_KERNEL);
+	if (!aes_mgr) {
 		dev_err(&pdev->dev, "s805 AES mgr device failed to allocate.\n");
 		return -ENOMEM;
 	}
 
-    mgr->dev = &pdev->dev;
+    aes_mgr->dev = &pdev->dev;
 
-	INIT_LIST_HEAD(&mgr->jobs);
-	spin_lock_init(&mgr->lock);
+	INIT_LIST_HEAD(&aes_mgr->jobs);
+	spin_lock_init(&aes_mgr->lock);
 	
 	dma_cap_zero(mask);
 	
@@ -530,26 +519,26 @@ static int s805_aes_probe(struct platform_device *pdev)
 
 	if (!chan) {
 
-		dev_err(mgr->dev, "s805 AES: failed to get dma channel.\n");
-		kfree(mgr);
+		dev_err(aes_mgr->dev, "s805 AES: failed to get dma channel.\n");
+		kfree(aes_mgr);
 		return -ENOSYS;
 		
 	} else {
 		
-		dev_info(mgr->dev, "s805 AES: grabbed dma channel (%s).\n", dma_chan_name(chan));
-		mgr->chan = to_s805_dma_chan(chan);
+		dev_info(aes_mgr->dev, "s805 AES: grabbed dma channel (%s).\n", dma_chan_name(chan));
+		aes_mgr->chan = to_s805_dma_chan(chan);
 	}
 	
 	err = s805_aes_register_algs();
 	
 	if (err) {
 		
-		dev_err(mgr->dev, "s805 AES: failed to register algorithms.\n");
-		kfree(mgr);
+		dev_err(aes_mgr->dev, "s805 AES: failed to register algorithms.\n");
+		kfree(aes_mgr);
 		return err;
 	}
 	
-    dev_info(mgr->dev, "Loaded S805 AES crypto driver\n");
+    dev_info(aes_mgr->dev, "Loaded S805 AES crypto driver\n");
 
 	return 0;
 }
@@ -557,8 +546,8 @@ static int s805_aes_probe(struct platform_device *pdev)
 static int s805_aes_remove(struct platform_device *pdev)
 {
 	
-	dma_release_channel ( &mgr->chan->vc.chan );
-	kfree(mgr);
+	dma_release_channel ( &aes_mgr->chan->vc.chan );
+	kfree(aes_mgr);
 
 	return 0;
 }

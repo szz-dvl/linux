@@ -60,6 +60,16 @@ typedef enum aes_dir {
     AES_DIR_ENCRYPT
 } s805_aes_dir;
 
+typedef enum tdes_mode {
+	TDES_MODE_ECB,
+    TDES_MODE_CBC
+} s805_tdes_mode;
+
+typedef enum tdes_dir {
+	TDES_DIR_ENCRYPT,
+    TDES_DIR_DECRYPT
+} s805_tdes_dir;
+
 /* S805 Datasheet p.57 */
 struct s805_table_desc 
 {
@@ -141,6 +151,7 @@ typedef struct init_descriptor {
 	uint frames;
 	s805_desc_type type;
 	s805_init_aes_desc aes_nfo;
+	s805_tdes_mode tdes_mode;
 	struct s805_desc * d;
 	
 } s805_init_desc;

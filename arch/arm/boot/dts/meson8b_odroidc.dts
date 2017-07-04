@@ -85,6 +85,11 @@
 		compatible = "aml,amls805-aes";
 		status= "ok";
 	};
+
+	s805-tdes {
+		compatible = "aml,amls805-tdes";
+		status= "ok";
+	};
 	
    meson-rng {
         compatible = "amlogic,meson-rng";
