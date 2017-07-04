@@ -1,5 +1,6 @@
 #include <linux/kernel.h>
 #include <linux/dmapool.h>
+#include <linux/dmaengine.h>
 #include <mach/am_regs.h>
 #include <../drivers/dma/virt-dma.h>
 
@@ -20,6 +21,14 @@ typedef enum inline_types {
 	INLINE_AES
 } s805_dma_tr_type;
 
+typedef enum desc_types {
+    BLKMV_DESC,
+    AES_DESC,
+    TDES_DESC,
+	CRC_DESC,
+	DIVX_DESC
+} s805_desc_type;
+
 /* S805 Datasheet p.58 */
 typedef enum endian_types {
 	ENDIAN_NO_CHANGE,
@@ -31,6 +40,25 @@ typedef enum endian_types {
 	ENDIAN_TYPE_6,
 	ENDIAN_TYPE_7
 } s805_dma_endian_type;
+
+typedef enum aes_key_type {
+	AES_KEY_TYPE_128,
+	AES_KEY_TYPE_192,
+	AES_KEY_TYPE_256,
+	AES_KEY_TYPE_RESERVED,
+} s805_aes_key_type;
+
+typedef enum aes_mode {
+	AES_MODE_ECB,
+    AES_MODE_CBC,
+	AES_MODE_CTR,
+	AES_MODE_RESERVED,
+} s805_aes_mode;
+
+typedef enum aes_dir {
+	AES_DIR_DECRYPT,
+    AES_DIR_ENCRYPT
+} s805_aes_dir;
 
 /* S805 Datasheet p.57 */
 struct s805_table_desc 
@@ -100,6 +128,24 @@ typedef struct s805_chan {
 	
 } s805_chan;
 
+typedef struct aes_init_descriptor {
+
+	s805_aes_key_type type;
+	s805_aes_mode mode;
+	s805_aes_dir dir;
+
+
+} s805_init_aes_desc;
+
+typedef struct init_descriptor {
+
+	uint frames;
+	s805_desc_type type;
+	s805_init_aes_desc aes_nfo;
+	struct s805_desc * d;
+	
+} s805_init_desc;
+
 static inline struct s805_desc *to_s805_dma_desc(struct dma_async_tx_descriptor *t)
 {
 	return container_of(t, struct s805_desc, vd.tx);
@@ -111,4 +157,5 @@ static inline struct s805_chan *to_s805_dma_chan(struct dma_chan *c)
 }
 
 
-void add_zeroed_tdesc (struct s805_desc * d);
+struct dma_async_tx_descriptor * s805_scatterwalk (struct s805_chan * c, struct scatterlist * src_sg, struct scatterlist * dst_sg, s805_init_desc * init_nfo, unsigned long flags);
+s805_dtable * sg_aes_move_along (s805_dtable * cursor, s805_init_desc * init_nfo);

@@ -2,7 +2,6 @@
 
 #include <linux/platform_device.h>
 #include <linux/printk.h>
-#include <linux/dmaengine.h>
 #include <linux/dma-mapping.h>
 #include <linux/err.h>
 #include <linux/init.h>
@@ -75,7 +74,7 @@ struct memset_info {
 	dma_addr_t paddr;
 };
 
-/* Auxiliar structure for dma_sg */
+/* Auxiliar structure for sg lists */
 struct sg_info {
 
     struct scatterlist * cursor;
@@ -101,7 +100,7 @@ MODULE_DEVICE_TABLE(of, s805_dma_of_match);
    To detect the end of the transaction. 
    
 */
-void add_zeroed_tdesc (struct s805_desc * d)
+static void add_zeroed_tdesc (struct s805_desc * d)
 {
 	
 	s805_dtable * desc_tbl = kzalloc(sizeof(s805_dtable), GFP_NOWAIT);
@@ -180,7 +179,7 @@ static s805_dtable * def_init_new_tdesc (struct s805_chan * c, unsigned int fram
 
 /* Auxiliar functions for DMA_SG: */
 
-inline void fwd_sg (struct sg_info * info) {
+static inline void fwd_sg (struct sg_info * info) {
 
 	if (info->cursor) {
 		
@@ -197,7 +196,7 @@ inline void fwd_sg (struct sg_info * info) {
 			
 }
 
-int get_sg_icg (struct sg_info * info) {
+static int get_sg_icg (struct sg_info * info) {
 
 	/* 
 	   Notice the integer return type, since we don't know if information will be arranged sequentially in memory. 
@@ -210,18 +209,20 @@ int get_sg_icg (struct sg_info * info) {
 		return -1;
 }
 
-uint get_sg_remain (struct sg_info * info) {
+static uint get_sg_remain (struct sg_info * info) {
 	
 	if (info->cursor)
 		return sg_dma_len(info->cursor) - info->bytes;
 	else
-		return UINT_MAX; /* For convenience in dma_sg */
+		return UINT_MAX; /* For convenience in s805_scatterwalk */
 }
 
-s805_dtable * move_along (s805_dtable * cursor, struct s805_desc *d) {
-	
-	list_add_tail(&cursor->elem, &d->desc_list);
-	d->frames ++;
+static s805_dtable * sg_move_along (s805_dtable * cursor, struct s805_desc *d) {
+
+	if (cursor) {
+		list_add_tail(&cursor->elem, &d->desc_list);
+		d->frames ++;
+	}
 	
 	return def_init_new_tdesc(d->c, d->frames);
 	
@@ -233,6 +234,204 @@ static bool sg_ent_complete (struct sg_info * info) {
 		return sg_dma_len(info->cursor) == info->bytes;
 	else
 		return false;
+}
+
+static s805_dtable * sg_init_desc (s805_dtable * cursor, s805_init_desc * init_nfo) {
+
+	switch(init_nfo->type) {
+	case BLKMV_DESC:
+		return sg_move_along (cursor, init_nfo->d);
+	case AES_DESC:
+		return sg_aes_move_along (cursor, init_nfo);
+	default:
+		return NULL;
+	}
+
+
+}
+
+struct dma_async_tx_descriptor * s805_scatterwalk (struct s805_chan * c, struct scatterlist * src_sg, struct scatterlist * dst_sg, s805_init_desc * init_nfo, unsigned long flags) {
+
+	struct s805_desc *d;
+	s805_dtable * temp, * desc_tbl;
+	unsigned int src_len, dst_len;
+	dma_addr_t src_addr, dst_addr;
+	int min_size, act_size, icg, next_icg, next_burst;
+	bool new_block;
+	struct sg_info src_info, dst_info;
+
+	/* Allocate and setup the descriptor. */
+    d = kzalloc(sizeof(struct s805_desc), GFP_NOWAIT);
+	if (!d) {
+		kfree(init_nfo);
+		return NULL;
+	}
+	
+	d->c = c;
+	d->frames = 0;
+	INIT_LIST_HEAD(&d->desc_list);
+   
+	init_nfo->d = d;
+
+	desc_tbl = sg_init_desc (NULL, init_nfo);
+	
+	/* Auxiliar struct to iterate the lists. */
+	src_info.cursor = src_sg;
+	dst_info.cursor = dst_sg;
+	
+	src_info.next = sg_next(src_info.cursor);
+	dst_info.next = sg_next(dst_info.cursor);
+	
+	src_info.bytes = 0;
+	dst_info.bytes = 0;
+	
+	src_addr = sg_dma_address(src_info.cursor);
+	dst_addr = sg_dma_address(dst_info.cursor);
+	
+	/* "Fwd logic" not optimal, first approach, must do. */
+	while (src_info.cursor || dst_info.cursor) {
+		
+		src_len = get_sg_remain(&src_info);
+		dst_len = get_sg_remain(&dst_info);
+	   
+	    min_size = min(dst_len, src_len);
+		
+	    while (min_size > 0) {
+			
+			act_size = min_size <= S805_MAX_TR_SIZE ? min_size : S805_MAX_TR_SIZE;
+			
+			if ((desc_tbl->table->count + act_size) > S805_MAX_TR_SIZE) {
+
+				desc_tbl = sg_init_desc (desc_tbl, init_nfo);
+					
+				if (!desc_tbl)
+					goto error_allocation;
+				
+				desc_tbl->table->src = src_addr + (dma_addr_t) src_info.bytes;
+				desc_tbl->table->dst = dst_addr + (dma_addr_t) dst_info.bytes;	
+					
+			}
+			
+		    desc_tbl->table->count += act_size;
+			
+			src_info.bytes += act_size;
+			dst_info.bytes += act_size;
+			
+		    min_size -= act_size;
+		}
+
+		/* Either src entry or dst entry are complete here.  */
+		
+		new_block = true;
+		
+		if (sg_ent_complete(&src_info)) {
+
+			icg = get_sg_icg(&src_info);
+			next_burst = src_info.next ? sg_dma_len(src_info.next) : -1;
+			fwd_sg(&src_info);
+			next_icg = get_sg_icg(&src_info);
+				
+			if (!desc_tbl->table->src_burst) {
+
+				/* This check will ensure that the next block will fit in the src_burst size we will allocate right after this lines. */
+				if (next_burst == desc_tbl->table->count &&
+					desc_tbl->table->count <= S805_DMA_MAX_BURST) {
+					
+				   
+					if (icg >= 0 && icg <= S805_DMA_MAX_SKIP && icg == next_icg) {
+								
+						desc_tbl->table->src_burst = desc_tbl->table->count; 
+						desc_tbl->table->src_skip = icg;
+						new_block = false;	
+						
+					}
+				}
+				
+			} else if (desc_tbl->table->src_burst == next_burst && (desc_tbl->table->src_skip == next_icg || !src_info.next)) 
+				new_block = false;
+			
+			src_addr = src_info.cursor ? sg_dma_address(src_info.cursor) : 0;
+			
+		} else
+			new_block = false; /* Fake, just to make sure next block will be evaluated. */
+		
+		if (sg_ent_complete(&dst_info) && !new_block) {
+
+			icg = get_sg_icg(&dst_info);
+			next_burst = dst_info.next ? sg_dma_len(dst_info.next) : -1;
+			fwd_sg(&dst_info);
+			next_icg = get_sg_icg(&dst_info);
+			
+			if (!desc_tbl->table->dst_burst) {
+
+				/* This check will ensure that the next block will fit in the dst_burst size we will allocate right after this lines. */
+				if (next_burst == desc_tbl->table->count &&
+					desc_tbl->table->count <= S805_DMA_MAX_BURST) {
+				
+					if (icg >= 0 && icg <= S805_DMA_MAX_SKIP && icg == next_icg) {
+						
+						desc_tbl->table->dst_burst = desc_tbl->table->count;
+						desc_tbl->table->dst_skip = icg;
+						new_block = false;
+						
+					} else
+						new_block = true;
+				} else
+					new_block = true;
+				
+			} else if (desc_tbl->table->dst_burst == next_burst && (desc_tbl->table->dst_skip == next_icg || !dst_info.next)) 
+				new_block = false;
+			else
+				new_block = true;
+
+			dst_addr = dst_info.cursor ? sg_dma_address(dst_info.cursor) : 0;
+		}
+
+		new_block = new_block && (dst_info.cursor || src_info.cursor);
+		
+		if (new_block) {
+			
+			desc_tbl = sg_init_desc (desc_tbl, init_nfo);
+			
+			if (!desc_tbl)
+				goto error_allocation;
+			
+			desc_tbl->table->src = src_addr + (dma_addr_t)src_info.bytes;
+			desc_tbl->table->dst = dst_addr + (dma_addr_t)dst_info.bytes;
+
+		} else if (!dst_info.cursor && !src_info.cursor) {
+
+			list_add_tail(&desc_tbl->elem, &d->desc_list);
+		    d->frames ++;	
+		}
+	}
+
+	/* Ensure that the last descriptor will interrupt us. */
+	list_entry(d->desc_list.prev, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
+	
+	add_zeroed_tdesc(d);
+
+	kfree (init_nfo);
+	
+	return vchan_tx_prep(&c->vc, &d->vd, flags);
+
+ error_allocation:
+	
+	dev_err(d->c->vc.chan.device->dev, "%s: Error allocating descriptors.", __func__);
+	
+	list_for_each_entry_safe (desc_tbl, temp, &d->desc_list, elem) {
+		
+		dma_pool_free(c->pool, desc_tbl->table, desc_tbl->paddr);
+		list_del(&desc_tbl->elem);
+		kfree(desc_tbl);
+		
+	}
+	
+	kfree(d);
+	kfree (init_nfo);
+	
+	return NULL;
+	
 }
 
 /* END of Auxiliar functions for DMA_SG */
@@ -397,7 +596,7 @@ s805_dma_prep_slave_sg( struct dma_chan *chan,
 			
 			if ((desc_tbl->table->count + act_size) > S805_MAX_TR_SIZE) {
 
-				desc_tbl = move_along(desc_tbl, d);
+				desc_tbl = sg_move_along(desc_tbl, d);
 					
 				if (!desc_tbl)
 					goto error_list;
@@ -503,7 +702,7 @@ s805_dma_prep_slave_sg( struct dma_chan *chan,
 		
 		if (new_block) {
 
-			desc_tbl = move_along(desc_tbl, d);
+			desc_tbl = sg_move_along(desc_tbl, d);
 			
 			if (!desc_tbl)
 				goto error_list;
@@ -1135,183 +1334,30 @@ s805_dma_prep_sg (struct dma_chan *chan,
 				  unsigned long flags)
 {
 	struct s805_chan *c = to_s805_dma_chan(chan);
-	struct s805_desc *d;
-	struct sg_info src_info, dst_info;
-	s805_dtable * desc_tbl, * temp;
-	unsigned int j, src_len, dst_len, bytes = 0;
-	dma_addr_t src_addr, dst_addr;
-	int min_size, act_size, icg, next_icg, next_burst;
-	bool new_block;
+	s805_init_desc * init_nfo;
+	struct scatterlist *aux;
+	int j, bytes = 0;
 	
-	for_each_sg(src_sg, src_info.cursor, src_nents, j) 
-		bytes += sg_dma_len(src_info.cursor);
+	for_each_sg(src_sg, aux, src_nents, j) 
+		bytes += sg_dma_len(aux);
 	
-	for_each_sg(dst_sg, dst_info.cursor, dst_nents, j) 
-		bytes -= sg_dma_len(dst_info.cursor);
+	for_each_sg(dst_sg, aux, dst_nents, j) 
+		bytes -= sg_dma_len(aux);
 	
 	if (bytes != 0) { 
 		
 		dev_err(chan->device->dev, "%s: Length for destination and source sg lists differ. \n", __func__);
 		return NULL;
 	}
-	
-	/* Allocate and setup the descriptor. */
-	d = kzalloc(sizeof(struct s805_desc), GFP_NOWAIT);
-	if (!d)
+
+	/* Allocate and setup the information for descriptor initialization */
+	init_nfo = kzalloc(sizeof(struct s805_desc), GFP_NOWAIT);
+	if (!init_nfo)
 		return NULL;
+
+	init_nfo->type = BLKMV_DESC;
 	
-	d->c = c;
-	d->frames = 0;
-	INIT_LIST_HEAD(&d->desc_list);
-
-	/* Auxiliar struct to iterate the lists. */
-	src_info.cursor = src_sg;
-	dst_info.cursor = dst_sg;
-	
-	src_info.next = sg_next(src_info.cursor);
-	dst_info.next = sg_next(dst_info.cursor);
-	
-	src_info.bytes = 0;
-	dst_info.bytes = 0;
-	
-	desc_tbl = def_init_new_tdesc(c, d->frames);
-	
-	src_addr = sg_dma_address(src_info.cursor);
-	dst_addr = sg_dma_address(dst_info.cursor);
-	
-	/* "Fwd logic" not optimal, first approach, must do. */
-	while (src_info.cursor || dst_info.cursor) {
-		
-		src_len = get_sg_remain(&src_info);
-		dst_len = get_sg_remain(&dst_info);
-	   
-	    min_size = min(dst_len, src_len);
-		
-	    while (min_size > 0) {
-			
-			act_size = min_size <= S805_MAX_TR_SIZE ? min_size : S805_MAX_TR_SIZE;
-			
-			if ((desc_tbl->table->count + act_size) > S805_MAX_TR_SIZE) {
-
-				desc_tbl = move_along(desc_tbl, d);
-					
-				if (!desc_tbl)
-					goto error_allocation;
-				
-				desc_tbl->table->src = src_addr + (dma_addr_t) src_info.bytes;
-				desc_tbl->table->dst = dst_addr + (dma_addr_t) dst_info.bytes;	
-					
-			}
-			
-		    desc_tbl->table->count += act_size;
-			
-			src_info.bytes += act_size;
-			dst_info.bytes += act_size;
-			
-		    min_size -= act_size;
-		}
-
-		new_block = true;
-
-		/* Si las 2 terminan a la vez, una cabe pero la otra no casco, diria ... to be tested! */
-		
-		if (sg_ent_complete(&src_info)) {
-
-			icg = get_sg_icg(&src_info);
-			next_burst = src_info.next ? sg_dma_len(src_info.next) : -1;
-			fwd_sg(&src_info);
-			next_icg = get_sg_icg(&src_info);
-				
-			if (!desc_tbl->table->src_burst) {
-
-				/* This check will ensure that the next block will fit in the src_burst size we will allocate right after this lines. */
-				if (next_burst == desc_tbl->table->count &&
-					desc_tbl->table->count <= S805_DMA_MAX_BURST) {
-					
-				   
-					if (icg >= 0 && icg <= S805_DMA_MAX_SKIP && icg == next_icg) {
-								
-						desc_tbl->table->src_burst = desc_tbl->table->count; 
-						desc_tbl->table->src_skip = icg;
-						new_block = false;	
-						
-					}
-				}
-				
-			} else if (desc_tbl->table->src_burst == next_burst && (desc_tbl->table->src_skip == next_icg || !src_info.next)) 
-				new_block = false;
-			
-			src_addr = src_info.cursor ? sg_dma_address(src_info.cursor) : 0;
-		}
-			
-		if (sg_ent_complete(&dst_info)) {
-
-			icg = get_sg_icg(&dst_info);
-			next_burst = dst_info.next ? sg_dma_len(dst_info.next) : -1;
-			fwd_sg(&dst_info);
-			next_icg = get_sg_icg(&dst_info);
-
-			if (!desc_tbl->table->dst_burst) {
-
-				/* This check will ensure that the next block will fit in the dst_burst size we will allocate right after this lines. */
-				if (next_burst == desc_tbl->table->count &&
-					desc_tbl->table->count <= S805_DMA_MAX_BURST) {
-				
-					if (icg >= 0 && icg <= S805_DMA_MAX_SKIP && icg == next_icg) {
-						
-						desc_tbl->table->dst_burst = desc_tbl->table->count;
-						desc_tbl->table->dst_skip = icg;
-						new_block = false;
-						
-					}
-				}
-				
-			} else if (desc_tbl->table->dst_burst == next_burst && (desc_tbl->table->dst_skip == next_icg || !dst_info.next)) 
-				new_block = false;
-
-			dst_addr = dst_info.cursor ? sg_dma_address(dst_info.cursor) : 0;
-		}
-
-		new_block = new_block && (dst_info.cursor || src_info.cursor);
-		
-		if (new_block) {
-			
-			desc_tbl = move_along(desc_tbl, d);
-			
-			if (!desc_tbl)
-				goto error_allocation;
-			
-			desc_tbl->table->src = src_addr + (dma_addr_t)src_info.bytes;
-			desc_tbl->table->dst = dst_addr + (dma_addr_t)dst_info.bytes;
-
-		} else if (!dst_info.cursor && !src_info.cursor) {
-
-			list_add_tail(&desc_tbl->elem, &d->desc_list);
-			d->frames ++;	
-		}
-	}
-
-	/* Ensure that the last descriptor will interrupt us. */
-	list_entry(d->desc_list.prev, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
-	
-	add_zeroed_tdesc(d);
-	
-	return vchan_tx_prep(&c->vc, &d->vd, flags);
-	
- error_allocation:
-	
-	dev_err(chan->device->dev, "%s: Error allocating descriptors.", __func__);
-	
-	list_for_each_entry_safe (desc_tbl, temp, &d->desc_list, elem) {
-		
-		dma_pool_free(c->pool, desc_tbl->table, desc_tbl->paddr);
-		list_del(&desc_tbl->elem);
-		kfree(desc_tbl);
-		
-	}
-	
-	kfree(d);
-	return NULL;
+    return s805_scatterwalk (c, src_sg, dst_sg, init_nfo, flags);
 }
 
 struct dma_async_tx_descriptor *
@@ -2459,7 +2505,7 @@ static struct platform_driver s805_dma_driver = {
 	.probe	= s805_dma_probe,
 	.remove	= s805_dma_remove,
 	.driver = {
-		.name = "s805-dmaengine",
+		.name = "s805-dmac",
 		.owner = THIS_MODULE,
 		.of_match_table = of_match_ptr(s805_dma_of_match),
 	},
