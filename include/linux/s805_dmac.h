@@ -81,7 +81,6 @@ struct s805_table_desc
 	
 } __attribute__ ((aligned (32)));
 
-
 typedef struct s805_table_desc_entry {
 
 	struct list_head elem;
@@ -145,11 +144,6 @@ typedef struct init_descriptor {
 	struct s805_desc * d;
 	
 } s805_init_desc;
-
-static inline struct s805_desc *to_s805_dma_desc(struct dma_async_tx_descriptor *t)
-{
-	return container_of(t, struct s805_desc, vd.tx);
-}
 
 static inline struct s805_chan *to_s805_dma_chan(struct dma_chan *c)
 {

@@ -84,6 +84,11 @@ struct sg_info {
 	
 };
 
+static inline struct s805_desc *to_s805_dma_desc(struct dma_async_tx_descriptor *t)
+{
+	return container_of(t, struct s805_desc, vd.tx);
+}
+
 static struct s805_dmadev *mgr;	    /* DMA manager */
 static unsigned int dma_channels = 0;
 

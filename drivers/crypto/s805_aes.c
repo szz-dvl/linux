@@ -1,7 +1,9 @@
 #include <linux/platform_device.h>
 #include <linux/module.h>
 #include <linux/crypto.h>
+#include <linux/random.h>
 #include <crypto/aes.h>
+#include <crypto/skcipher.h>
 #include <crypto/algapi.h>
 #include <linux/s805_dmac.h>
 
@@ -17,6 +19,11 @@
 #define S805_AES_KEY_6                        P_NDMA_AES_KEY_6
 #define S805_AES_KEY_7                        P_NDMA_AES_KEY_7
 
+#define S805_AES_IV_0                         P_NDMA_AES_IV_0
+#define S805_AES_IV_1                         P_NDMA_AES_IV_1
+#define S805_AES_IV_2                         P_NDMA_AES_IV_2
+#define S805_AES_IV_3                         P_NDMA_AES_IV_3
+
 #define S805_DTBL_AES_POST_ENDIAN(type)       ((type & 0xf) << 4)
 #define S805_DTBL_AES_PRE_ENDIAN(type)        (type & 0xf)
 #define S805_DTBL_AES_KEY_TYPE(type)          ((type & 0x3) << 8)
@@ -30,7 +37,8 @@ struct s805_crypto_mgr {
     struct s805_chan * chan;
 	struct list_head jobs;
 	spinlock_t lock;
-	
+
+	bool busy;
 };
 
 struct s805_crypto_mgr * mgr;
@@ -121,6 +129,35 @@ static void s805_aes_cra_exit(struct crypto_tfm *tfm)
 {
 }
 
+
+static int s805_aes_iv_gen (struct skcipher_givcrypt_request * skreq) {
+
+	u32 * aux;
+
+	spin_lock(&mgr->lock);
+	if (!mgr->busy) {
+		spin_unlock(&mgr->lock);
+
+		get_random_bytes (skreq->giv, AES_BLOCK_SIZE);
+
+		aux = (u32 *)skreq->giv;
+		
+		WR(aux[0], S805_AES_IV_0);
+		WR(aux[1], S805_AES_IV_1);
+		WR(aux[2], S805_AES_IV_2);
+		WR(aux[3], S805_AES_IV_3);
+
+		return 0;
+		
+	} else {
+
+		spin_unlock(&mgr->lock);
+		dev_err(mgr->dev, "%s: s805 AES engine is busy, please wait till all the pending jobs finish.\n", __func__);
+
+		return -ENOSYS;
+	}
+}
+
 static inline void s805_aes_cpykey_to_hw (const u32 * key, unsigned int keylen) {
 	
 	WR(key[0], S805_AES_KEY_0);
@@ -173,6 +210,10 @@ static int s805_aes_setkey(struct crypto_ablkcipher *tfm, const u8 *key,
 static int s805_aes_crypt_launch_job (struct dma_async_tx_descriptor * tx_desc, struct s805_aes_ctx *ctx) {
 
 	dma_cookie_t tx_cookie;
+
+	spin_lock(&mgr->lock);
+	mgr->busy = true;
+	spin_unlock(&mgr->lock);
 	
 	s805_aes_cpykey_to_hw ((const u32 *) ctx->key, ctx->keylen);
 
@@ -209,10 +250,12 @@ static void s805_aes_crypt_handle_completion (void * req_ptr) {
 		list_del(&list_first_entry (&mgr->jobs, struct s805_aes_job, elem)->elem);
 	
 	job = list_first_entry_or_null (&mgr->jobs, struct s805_aes_job, elem);
-		
-	if (job) 
-		s805_aes_crypt_launch_job(job->tx_desc, job->ctx);
 
+	if (job)  
+		s805_aes_crypt_launch_job(job->tx_desc, job->ctx);
+	else
+		mgr->busy = false;
+	
 	spin_unlock(&mgr->lock);
 }
 
@@ -314,24 +357,6 @@ static int s805_aes_crypt_prep (struct ablkcipher_request *req, s805_aes_mode mo
 		aux = sg_next(aux);
 		j ++;
 	}
-
-	j = 0;
-	aux = req->dst;
-	
-	while (aux) {
-
-		len = sg_dma_len(aux);
-		
-		if (!IS_ALIGNED(len, AES_BLOCK_SIZE)) {
-		    dev_err(mgr->dev, "%s: Block %d of dst sg list is not aligned with AES_BLOCK_SIZE.\n", __func__, j);
-			kfree(init_nfo);
-			return -EINVAL;
-		}
-		
-		bytes += len;
-		aux = sg_next(aux);
-		j++;
-	}
 	
 	if (bytes != 0) { 
 		
@@ -410,6 +435,8 @@ static struct crypto_alg s805_aes_algs[] = {
 		.setkey		         = s805_aes_setkey,
 		.encrypt	         = s805_aes_ecb_encrypt,
 		.decrypt	         = s805_aes_ecb_decrypt,
+		.givencrypt          = s805_aes_iv_gen,
+		.givdecrypt          = s805_aes_iv_gen,
 	}
 },
 {
@@ -431,6 +458,8 @@ static struct crypto_alg s805_aes_algs[] = {
 		.setkey		         = s805_aes_setkey,
 		.encrypt	         = s805_aes_cbc_encrypt,
 		.decrypt	         = s805_aes_cbc_decrypt,
+		.givencrypt          = s805_aes_iv_gen,
+		.givdecrypt          = s805_aes_iv_gen,
 	}
 },
 {
@@ -452,6 +481,8 @@ static struct crypto_alg s805_aes_algs[] = {
 		.setkey		         = s805_aes_setkey,
 		.encrypt	         = s805_aes_ctr_encrypt,
 		.decrypt	         = s805_aes_ctr_decrypt,
+		.givencrypt          = s805_aes_iv_gen,
+		.givdecrypt          = s805_aes_iv_gen,
 	}
 }
 };
