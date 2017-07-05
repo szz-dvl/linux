@@ -1366,8 +1366,6 @@ s805_dma_prep_sg (struct dma_chan *chan,
 		kfree(init_nfo);
 		return NULL;
 	}
-
-	init_nfo->d = d;
 	
 	d->c = c;
 	d->frames = 0;
