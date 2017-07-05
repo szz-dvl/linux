@@ -248,14 +248,21 @@ static s805_dtable * sg_init_desc (s805_dtable * cursor, s805_init_desc * init_n
 		return sg_move_along (cursor, init_nfo->d);
 	case AES_DESC:
 		return sg_aes_move_along (cursor, init_nfo);
+	case TDES_DESC:
+		return sg_tdes_move_along (cursor, init_nfo);
+	case CRC_DESC:
+		return sg_crc_move_along (cursor, init_nfo);
 	default:
 		return NULL;
 	}
-
-
 }
 
-struct dma_async_tx_descriptor * s805_scatterwalk (struct s805_chan * c, struct scatterlist * src_sg, struct scatterlist * dst_sg, s805_init_desc * init_nfo, unsigned long flags) {
+struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
+												   struct scatterlist * dst_sg,
+												   s805_init_desc * init_nfo,
+												   unsigned long flags,
+												   struct dma_async_tx_descriptor * old,
+												   bool last) {
 
 	struct s805_desc *d;
 	s805_dtable * temp, * desc_tbl;
@@ -265,33 +272,25 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct s805_chan * c, struct 
 	bool new_block;
 	struct sg_info src_info, dst_info;
 
-	/* Allocate and setup the descriptor. */
-    d = kzalloc(sizeof(struct s805_desc), GFP_NOWAIT);
-	if (!d) {
-		kfree(init_nfo);
-		return NULL;
-	}
+	if (old)
+		d = init_nfo->d = to_s805_dma_desc(old);
+	else
+		d = init_nfo->d;
 	
-	d->c = c;
-	d->frames = 0;
-	INIT_LIST_HEAD(&d->desc_list);
-   
-	init_nfo->d = d;
-
 	desc_tbl = sg_init_desc (NULL, init_nfo);
 	
 	/* Auxiliar struct to iterate the lists. */
 	src_info.cursor = src_sg;
 	dst_info.cursor = dst_sg;
 	
-	src_info.next = sg_next(src_info.cursor);
-	dst_info.next = sg_next(dst_info.cursor);
+	src_info.next = src_info.cursor ? sg_next(src_info.cursor) : NULL;
+	dst_info.next = dst_info.cursor ? sg_next(dst_info.cursor) : NULL;
 	
 	src_info.bytes = 0;
 	dst_info.bytes = 0;
 	
-	src_addr = sg_dma_address(src_info.cursor);
-	dst_addr = sg_dma_address(dst_info.cursor);
+	src_addr = src_info.cursor ? sg_dma_address(src_info.cursor) : 0;
+	dst_addr = dst_info.cursor ? sg_dma_address(dst_info.cursor) : 0;
 	
 	/* "Fwd logic" not optimal, first approach, must do. */
 	while (src_info.cursor || dst_info.cursor) {
@@ -313,8 +312,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct s805_chan * c, struct 
 					goto error_allocation;
 				
 				desc_tbl->table->src = src_addr + (dma_addr_t) src_info.bytes;
-				desc_tbl->table->dst = dst_addr + (dma_addr_t) dst_info.bytes;	
-					
+				desc_tbl->table->dst = dst_addr + (dma_addr_t) dst_info.bytes;		
 			}
 			
 		    desc_tbl->table->count += act_size;
@@ -411,14 +409,17 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct s805_chan * c, struct 
 		}
 	}
 
-	/* Ensure that the last descriptor will interrupt us. */
-	list_entry(d->desc_list.prev, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
-	
-	add_zeroed_tdesc(d);
+	if (last) {
+		
+		/* Ensure that the last descriptor will interrupt us. */
+		list_entry(d->desc_list.prev, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
+		add_zeroed_tdesc(d);
 
+	}
+	
 	kfree (init_nfo);
 	
-	return vchan_tx_prep(&c->vc, &d->vd, flags);
+	return old ? old : vchan_tx_prep(&d->c->vc, &d->vd, flags);
 
  error_allocation:
 	
@@ -426,7 +427,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct s805_chan * c, struct 
 	
 	list_for_each_entry_safe (desc_tbl, temp, &d->desc_list, elem) {
 		
-		dma_pool_free(c->pool, desc_tbl->table, desc_tbl->paddr);
+		dma_pool_free(d->c->pool, desc_tbl->table, desc_tbl->paddr);
 		list_del(&desc_tbl->elem);
 		kfree(desc_tbl);
 		
@@ -1338,11 +1339,12 @@ s805_dma_prep_sg (struct dma_chan *chan,
 				  struct scatterlist *src_sg, unsigned int src_nents,
 				  unsigned long flags)
 {
+	struct s805_desc *d;
 	struct s805_chan *c = to_s805_dma_chan(chan);
 	s805_init_desc * init_nfo;
 	struct scatterlist *aux;
 	int j, bytes = 0;
-	
+
 	for_each_sg(src_sg, aux, src_nents, j) 
 		bytes += sg_dma_len(aux);
 	
@@ -1354,7 +1356,7 @@ s805_dma_prep_sg (struct dma_chan *chan,
 		dev_err(chan->device->dev, "%s: Length for destination and source sg lists differ. \n", __func__);
 		return NULL;
 	}
-
+	
 	/* Allocate and setup the information for descriptor initialization */
 	init_nfo = kzalloc(sizeof(struct s805_desc), GFP_NOWAIT);
 	if (!init_nfo)
@@ -1362,7 +1364,20 @@ s805_dma_prep_sg (struct dma_chan *chan,
 
 	init_nfo->type = BLKMV_DESC;
 	
-    return s805_scatterwalk (c, src_sg, dst_sg, init_nfo, flags);
+	/* Allocate and setup the descriptor. */
+    d = kzalloc(sizeof(struct s805_desc), GFP_NOWAIT);
+	if (!d) {
+		kfree(init_nfo);
+		return NULL;
+	}
+
+	init_nfo->d = d;
+	
+	d->c = c;
+	d->frames = 0;
+	INIT_LIST_HEAD(&d->desc_list);
+	
+    return s805_scatterwalk (src_sg, dst_sg, init_nfo, flags, NULL, true);
 }
 
 struct dma_async_tx_descriptor *

@@ -1,9 +1,6 @@
 #include <linux/platform_device.h>
 #include <linux/module.h>
 #include <linux/crypto.h>
-#include <linux/random.h>
-#include <crypto/aes.h>
-#include <crypto/skcipher.h>
 #include <crypto/algapi.h>
 #include <linux/s805_dmac.h>
 
@@ -278,9 +275,10 @@ static int s805_tdes_crypt_prep (struct ablkcipher_request *req, s805_tdes_mode 
 	while (aux) {
 
 		len = sg_dma_len(aux);
-		
-		if (!IS_ALIGNED(len, AES_BLOCK_SIZE)) {
-		    dev_err(tdes_mgr->dev, "%s: Block %d of src sg list is not aligned with AES_BLOCK_SIZE.\n", __func__, j);
+
+		/* Needed here ?? */
+		if (!IS_ALIGNED(len, TDES_MIN_BLOCK_SIZE)) {
+		    dev_err(tdes_mgr->dev, "%s: Block %d of src sg list is not aligned with TDES_BLOCK_SIZE (%u Bytes).\n", __func__, j, TDES_MIN_BLOCK_SIZE);
 			kfree(init_nfo);
 			return -EINVAL;
 		}
@@ -288,8 +286,8 @@ static int s805_tdes_crypt_prep (struct ablkcipher_request *req, s805_tdes_mode 
 		aux = sg_next(aux);
 		j ++;
 	}
-	
-	tx_desc = s805_scatterwalk (tdes_mgr->chan, req->src, req->dst, init_nfo, 0);
+
+	tx_desc = dmaengine_prep_dma_interrupt (&tdes_mgr->chan->vc.chan, 0);
 
 	if (!tx_desc) {
 		
@@ -297,6 +295,8 @@ static int s805_tdes_crypt_prep (struct ablkcipher_request *req, s805_tdes_mode 
 		kfree(init_nfo);
 		return -ENOMEM;
 	}
+
+	s805_scatterwalk (req->src, req->dst, init_nfo, 0, tx_desc, true);
 	
 	tx_desc->callback = (void *) &s805_tdes_crypt_handle_completion;
 	tx_desc->callback_param = (void *) req;
@@ -399,7 +399,7 @@ static int s805_tdes_probe(struct platform_device *pdev)
 	
     tdes_mgr = kzalloc(sizeof(struct s805_tdes_mgr), GFP_KERNEL);
 	if (!tdes_mgr) {
-		dev_err(&pdev->dev, "s805 AES mgr device failed to allocate.\n");
+		dev_err(&pdev->dev, "s805 TDES mgr device failed to allocate.\n");
 		return -ENOMEM;
 	}
 
@@ -408,12 +408,22 @@ static int s805_tdes_probe(struct platform_device *pdev)
 	INIT_LIST_HEAD(&tdes_mgr->jobs);
 	spin_lock_init(&tdes_mgr->lock);
 	
+	err = s805_tdes_register_algs();
+	
+	if (err) {
+		
+		dev_err(tdes_mgr->dev, "s805 TDES: failed to register algorithms.\n");
+		kfree(tdes_mgr);
+		return err;
+	}
+
 	dma_cap_zero(mask);
+	dma_cap_set(DMA_INTERRUPT, mask);
 	
     chan = dma_request_channel ( mask, NULL, NULL );
-
+	
 	if (!chan) {
-
+		
 		dev_err(tdes_mgr->dev, "s805 TDES: failed to get dma channel.\n");
 		kfree(tdes_mgr);
 		return -ENOSYS;
@@ -422,15 +432,6 @@ static int s805_tdes_probe(struct platform_device *pdev)
 		
 		dev_info(tdes_mgr->dev, "s805 TDES: grabbed dma channel (%s).\n", dma_chan_name(chan));
 		tdes_mgr->chan = to_s805_dma_chan(chan);
-	}
-	
-	err = s805_tdes_register_algs();
-	
-	if (err) {
-		
-		dev_err(tdes_mgr->dev, "s805 TDES: failed to register algorithms.\n");
-		kfree(tdes_mgr);
-		return err;
 	}
 	
     dev_info(tdes_mgr->dev, "Loaded S805 TDES crypto driver\n");

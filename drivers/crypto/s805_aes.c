@@ -132,6 +132,15 @@ static void s805_aes_cra_exit(struct crypto_tfm *tfm)
 
 static int s805_aes_iv_gen (struct skcipher_givcrypt_request * skreq) {
 
+	/*
+	  Hints:
+	  
+	   * http://elixir.free-electrons.com/linux/v3.10.104/source/crypto/chainiv.c
+	   * http://elixir.free-electrons.com/linux/v3.10.104/source/crypto/eseqiv.c
+	   * http://elixir.free-electrons.com/linux/v3.10.104/source/crypto/seqiv.c
+	   
+	*/
+	
 	u32 * aux;
 
 	spin_lock(&aes_mgr->lock);
@@ -164,18 +173,19 @@ static inline void s805_aes_cpykey_to_hw (const u32 * key, unsigned int keylen) 
 	WR(key[1], S805_AES_KEY_1);
 	WR(key[2], S805_AES_KEY_2);
 	WR(key[3], S805_AES_KEY_3);
-
+	
 	if (keylen >= AES_KEYSIZE_192) {
 		
 		WR(key[4], S805_AES_KEY_4);
 		WR(key[5], S805_AES_KEY_5);
+		
 	}
 
 	if (keylen >= AES_KEYSIZE_256) {
-
+		
 		WR(key[6], S805_AES_KEY_6);
 		WR(key[7], S805_AES_KEY_7);
-
+		
 	}
 }
 
@@ -353,7 +363,7 @@ static int s805_aes_crypt_prep (struct ablkcipher_request *req, s805_aes_mode mo
 		j ++;
 	}
 	
-	tx_desc = s805_scatterwalk (aes_mgr->chan, req->src, req->dst, init_nfo, 0);
+	tx_desc = dmaengine_prep_dma_interrupt (&aes_mgr->chan->vc.chan, 0);
 
 	if (!tx_desc) {
 		
@@ -361,6 +371,8 @@ static int s805_aes_crypt_prep (struct ablkcipher_request *req, s805_aes_mode mo
 		kfree(init_nfo);
 		return -ENOMEM;
 	}
+
+	s805_scatterwalk (req->src, req->dst, init_nfo, 0, tx_desc, true);
 	
 	tx_desc->callback = (void *) &s805_aes_crypt_handle_completion;
 	tx_desc->callback_param = (void *) req;
@@ -513,7 +525,17 @@ static int s805_aes_probe(struct platform_device *pdev)
 	INIT_LIST_HEAD(&aes_mgr->jobs);
 	spin_lock_init(&aes_mgr->lock);
 	
+	err = s805_aes_register_algs();
+	
+	if (err) {
+		
+		dev_err(aes_mgr->dev, "s805 AES: failed to register algorithms.\n");
+		kfree(aes_mgr);
+		return err;
+	}
+	
 	dma_cap_zero(mask);
+	dma_cap_set(DMA_INTERRUPT, mask);
 	
     chan = dma_request_channel ( mask, NULL, NULL );
 
@@ -527,15 +549,6 @@ static int s805_aes_probe(struct platform_device *pdev)
 		
 		dev_info(aes_mgr->dev, "s805 AES: grabbed dma channel (%s).\n", dma_chan_name(chan));
 		aes_mgr->chan = to_s805_dma_chan(chan);
-	}
-	
-	err = s805_aes_register_algs();
-	
-	if (err) {
-		
-		dev_err(aes_mgr->dev, "s805 AES: failed to register algorithms.\n");
-		kfree(aes_mgr);
-		return err;
 	}
 	
     dev_info(aes_mgr->dev, "Loaded S805 AES crypto driver\n");
