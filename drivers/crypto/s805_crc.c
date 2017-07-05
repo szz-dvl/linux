@@ -30,6 +30,9 @@ struct s805_crc_reqctx {
 
 	struct dma_async_tx_descriptor * tx_desc;
 	s805_init_desc * init_nfo;
+	bool initialized;
+	bool finalized;
+	
 	struct list_head elem;
 
 };
@@ -98,7 +101,8 @@ static int s805_crc_launch_job (struct s805_crc_reqctx *ctx, bool chain) {
 	if (!crc_mgr->busy || chain) {
 		crc_mgr->busy = true;
 		spin_unlock(&crc_mgr->lock);
-		
+
+		ctx->finalized = true;
 		tx_cookie = dmaengine_submit(ctx->tx_desc);
 		
 		if(tx_cookie < 0) {
@@ -120,8 +124,9 @@ static int s805_crc_launch_job (struct s805_crc_reqctx *ctx, bool chain) {
 
 static void s805_crc_handle_completion (void * req_ptr) {
 
-    struct s805_crc_reqctx * job;
     struct ahash_request *req = req_ptr;
+	struct s805_crc_reqctx *job = ahash_request_ctx(req);
+	
 	u32 result = RD(S805_CRC_CHECK_SUM);
 	
 	memcpy(req->result, &result, S805_CRC_DIGEST_SIZE);
@@ -129,13 +134,11 @@ static void s805_crc_handle_completion (void * req_ptr) {
 	req->base.complete(&req->base, 0);
 	
 	spin_lock(&crc_mgr->lock);
-	
-	job = list_first_entry (&crc_mgr->jobs, struct s805_crc_reqctx, elem);
 	list_del(&job->elem);
-	
 	spin_unlock(&crc_mgr->lock);
-
+	
 	kfree(job->init_nfo);
+	job->initialized = false;
 
 	/* It will be user responsibility to free the result field, is this correct?, must we force the user to allocate the field too? */
 	
@@ -153,6 +156,20 @@ static void s805_crc_handle_completion (void * req_ptr) {
 static int s805_crc_add_data (struct ahash_request *req, bool last) {
 
 	struct s805_crc_reqctx *ctx = ahash_request_ctx(req);
+
+	if (!ctx->initialized) {
+
+		dev_err(crc_mgr->dev, "%s: Uninitialized request.\n", __func__);
+		return -ENOSYS;
+
+	}
+
+	if (ctx->finalized) {
+
+		dev_err(crc_mgr->dev, "%s: Already finalized request.\n", __func__);
+		return -EINVAL;
+		
+	}
 	
 	ctx->tx_desc = s805_scatterwalk (req->src, NULL, ctx->init_nfo, ctx->tx_desc, last);
 
@@ -170,6 +187,11 @@ static int s805_crc_init_ctx (struct ahash_request *req) {
 
 	struct s805_crc_reqctx *ctx = ahash_request_ctx(req);
 
+	if (ctx->initialized)
+		return 1;
+	else if (ctx->finalized)
+		ctx->finalized = false;
+	
 	ctx->tx_desc = dmaengine_prep_dma_interrupt (&crc_mgr->chan->vc.chan, 0);
 
 	if (!ctx->tx_desc) {
@@ -190,16 +212,20 @@ static int s805_crc_init_ctx (struct ahash_request *req) {
 
 	ctx->init_nfo->type = CRC_DESC;
 
-	/* User responsibility? */
-	req->result = kzalloc(S805_CRC_DIGEST_SIZE, GFP_NOWAIT);
-
 	if (!req->result) {
-	    dev_err(crc_mgr->dev, "%s: Failed to allocate result field.\n", __func__);
-		kfree(ctx->init_nfo);
-		return -ENOMEM;
-	}
 
-	req->base.data = req->result;
+		/* User responsibility? */
+		req->result = kzalloc(S805_CRC_DIGEST_SIZE, GFP_NOWAIT);
+
+		if (!req->result) {
+			dev_err(crc_mgr->dev, "%s: Failed to allocate result field.\n", __func__);
+			kfree(ctx->init_nfo);
+			return -ENOMEM;
+		}
+	}
+	
+	req->base.data = req->result; /* To easily recover the result from completion callback. */
+	ctx->initialized = true;
 	
 	return 0;
 
@@ -212,7 +238,7 @@ static int s805_crc_hash_init (struct ahash_request *req) {
 }
 
 static int s805_crc_hash_update (struct ahash_request *req) {
-
+	
     return s805_crc_add_data (req, false);
 
 }
@@ -221,6 +247,20 @@ static int s805_crc_hash_final (struct ahash_request *req) {
 
 	struct s805_crc_reqctx *ctx = ahash_request_ctx(req);
 
+	if (!ctx->initialized) {
+
+		dev_err(crc_mgr->dev, "%s: Uninitialized request.\n", __func__);
+		return -ENOSYS;
+
+	}
+
+	if (ctx->finalized) {
+
+		dev_err(crc_mgr->dev, "%s: Already finalized request.\n", __func__);
+		return -EINVAL;
+		
+	}
+	
 	s805_close_desc (ctx->tx_desc);
 	
     spin_lock(&crc_mgr->lock);
@@ -236,7 +276,7 @@ static int s805_crc_hash_final (struct ahash_request *req) {
 static int s805_crc_hash_finup (struct ahash_request *req) {
 
 	struct s805_crc_reqctx *ctx = ahash_request_ctx(req);
-	int err = s805_crc_add_data (req, true);
+    int err = s805_crc_add_data (req, true);
 	
 	if (err) {
 		
@@ -257,7 +297,7 @@ static int s805_crc_hash_digest (struct ahash_request *req) {
 	struct s805_crc_reqctx *ctx = ahash_request_ctx(req);
 	int err = s805_crc_init_ctx (req);
 
-	if (err) {
+	if (err < 0) {
 		
 		dev_err(crc_mgr->dev, "%s: Failed to initialize context.\n", __func__);
 		return err;
@@ -280,7 +320,7 @@ static int s805_crc_hash_digest (struct ahash_request *req) {
 }
 
 static int s805_crc_hash_export (struct ahash_request *req, void *out) {
-
+	
 	out = ahash_request_ctx(req);
 
 	return 0;
