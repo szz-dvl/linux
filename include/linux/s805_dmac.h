@@ -161,12 +161,13 @@ static inline struct s805_chan *to_s805_dma_chan(struct dma_chan *c)
 	return container_of(c, struct s805_chan, vc.chan);
 }
 
-
 struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 												   struct scatterlist * dst_sg,
 												   s805_init_desc * init_nfo,
 												   struct dma_async_tx_descriptor * tx_desc,
 												   bool last);
+
+void s805_close_desc (struct dma_async_tx_descriptor * tx_desc);
 
 s805_dtable * sg_aes_move_along (s805_dtable * cursor, s805_init_desc * init_nfo);
 s805_dtable * sg_tdes_move_along (s805_dtable * cursor, s805_init_desc * init_nfo);

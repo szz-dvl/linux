@@ -35,7 +35,7 @@ config CRYPTO_DEV_S805_TDES
 	  you want to lend a hand, otherwise say N.
 
 config CRYPTO_DEV_S805_CRC
-	tristate "Amlogic s805 DMAC driver for CRC algorithm."
+	tristate "Amlogic s805 DMAC driver for CRC-32 algorithm."
 	depends on S805_DMAC
 	default y if S805_DMAC
 	help

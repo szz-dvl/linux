@@ -1,9 +1,7 @@
 #include <linux/platform_device.h>
 #include <linux/module.h>
-#include <linux/crypto.h>
-#include <crypto/algapi.h>
 #include <linux/s805_dmac.h>
-
+#include <linux/s805_crypto.h>
 
 /* Registers & Bitmaps for the s805 DMAC AES algorithm. */
 #define TDES_MIN_BLOCK_SIZE                   8
@@ -45,11 +43,11 @@ struct s805_tdes_ctx {
 
 };
 
-struct s805_tdes_job {
+struct s805_tdes_reqctx {
 
     struct dma_async_tx_descriptor * tx_desc;
-	struct s805_tdes_ctx * ctx;
 	s805_tdes_dir dir;
+	s805_tdes_mode mode;
 	
 	struct list_head elem;
 };
@@ -107,6 +105,8 @@ s805_dtable * sg_tdes_move_along (s805_dtable * cursor, s805_init_desc * init_nf
 
 static int s805_tdes_cra_init(struct crypto_tfm *tfm)
 {
+	tfm->crt_ablkcipher.reqsize = sizeof(struct s805_tdes_reqctx);
+	
 	return 0;
 }
 
@@ -114,12 +114,15 @@ static void s805_tdes_cra_exit(struct crypto_tfm *tfm)
 {
 }
 
-static inline void s805_tdes_set_hw_regs (struct s805_tdes_ctx *ctx, s805_tdes_dir dir) {
+static inline void s805_tdes_set_hw_regs (struct ablkcipher_request *req) {
 
+	struct s805_tdes_ctx *ctx = crypto_ablkcipher_ctx(crypto_ablkcipher_reqtfm(req));
+	struct s805_tdes_reqctx *rctx = ablkcipher_request_ctx(req);
+	
 	uint idx;
 	u64 key;
-	u32 khi, klow, ctrl, mode = ctx->keylen == TDES_ECB_KEY_SIZE ? TDES_MODE_ECB : TDES_MODE_CBC;
-	uint limit = ctx->keylen == TDES_ECB_KEY_SIZE ? 1 : 4; 
+	u32 khi, klow, ctrl;
+	uint limit = rctx->mode == TDES_MODE_ECB ? 1 : 4; 
 	
 	for (idx = 0; idx < limit; idx ++) {
 		
@@ -134,7 +137,7 @@ static inline void s805_tdes_set_hw_regs (struct s805_tdes_ctx *ctx, s805_tdes_d
 		WR (S805_CTRL_TDES_PUSH_KEY(idx), S805_TDES_CTRL); 
 	}
 
-	ctrl = S805_CTRL_TDES_MODE(mode) | S805_CTRL_TDES_DIR(dir) | S805_CTRL_TDES_PUSH_MODE;
+	ctrl = S805_CTRL_TDES_MODE(rctx->mode) | S805_CTRL_TDES_DIR(rctx->dir) | S805_CTRL_TDES_PUSH_MODE;
 	
 	WR(ctrl, S805_TDES_CTRL);
 }
@@ -171,18 +174,19 @@ static int s805_tdes_cbc_setkey(struct crypto_ablkcipher *tfm, const u8 *key, un
 	return 0;
 }
 
-static int s805_tdes_crypt_launch_job (struct s805_tdes_job * job) {
+static int s805_tdes_crypt_launch_job (struct ablkcipher_request *req, bool chain) {
 
+	struct s805_tdes_reqctx *rctx = ablkcipher_request_ctx(req);
 	dma_cookie_t tx_cookie;
 
 	spin_lock(&tdes_mgr->lock);
-	if (!tdes_mgr->busy) {
+	if (!tdes_mgr->busy || chain) {
 		tdes_mgr->busy = true;
 		spin_unlock(&tdes_mgr->lock);
 		
-		s805_tdes_set_hw_regs (job->ctx, job->dir);
+		s805_tdes_set_hw_regs (req);
 	
-		tx_cookie = dmaengine_submit(job->tx_desc);
+		tx_cookie = dmaengine_submit(rctx->tx_desc);
 	
 		if(tx_cookie < 0) {
 		
@@ -203,24 +207,19 @@ static int s805_tdes_crypt_launch_job (struct s805_tdes_job * job) {
 
 static void s805_tdes_crypt_handle_completion (void * req_ptr) {
 	
-	struct s805_tdes_job * job;
 	struct ablkcipher_request *req = req_ptr;
+	struct s805_tdes_reqctx *job = ablkcipher_request_ctx(req);
 	
 	req->base.complete(&req->base, 0);
 	
 	spin_lock(&tdes_mgr->lock);
-
-	job = list_first_entry (&tdes_mgr->jobs, struct s805_tdes_job, elem);
 	list_del(&job->elem);
-	
 	spin_unlock(&tdes_mgr->lock);
-	
-	kfree(job);
 
-	job = list_first_entry_or_null (&tdes_mgr->jobs, struct s805_tdes_job, elem);
+	job = list_first_entry_or_null (&tdes_mgr->jobs, struct s805_tdes_reqctx, elem);
 
 	if (job)  
-		s805_tdes_crypt_launch_job(job);
+		s805_tdes_crypt_launch_job(to_ablkcipher_request(job), true);
 	else {
 		spin_lock(&tdes_mgr->lock);
 		tdes_mgr->busy = false;
@@ -228,32 +227,22 @@ static void s805_tdes_crypt_handle_completion (void * req_ptr) {
 	}
 }
 
-static int s805_tdes_crypt_schedule_job (struct dma_async_tx_descriptor * tx_desc, struct s805_tdes_ctx *ctx, s805_tdes_dir dir) {
+static int s805_tdes_crypt_schedule_job (struct ablkcipher_request *req) {
 
-	struct s805_tdes_job * job;
-
-	job = kzalloc(sizeof(struct s805_tdes_job), GFP_NOWAIT);
-
-	if (!job) 			
-		return -ENOMEM;
-		
-	job->tx_desc = tx_desc;
-	job->ctx = ctx;
-	job->dir = dir;
-
+	struct s805_tdes_reqctx *rctx = ablkcipher_request_ctx(req);
+	   
 	spin_lock(&tdes_mgr->lock);
 		
-	list_add_tail(&job->elem, &tdes_mgr->jobs);
+	list_add_tail(&rctx->elem, &tdes_mgr->jobs);
 	
 	spin_unlock(&tdes_mgr->lock);
 
-	return s805_tdes_crypt_launch_job(job);
+	return s805_tdes_crypt_launch_job(req, false);
 }
 
 static int s805_tdes_crypt_prep (struct ablkcipher_request *req, s805_tdes_mode mode, s805_tdes_dir dir) {
-
-	struct s805_tdes_ctx *ctx = crypto_ablkcipher_ctx(crypto_ablkcipher_reqtfm(req));
-	struct dma_async_tx_descriptor * tx_desc;
+	
+	struct s805_tdes_reqctx *rctx = ablkcipher_request_ctx(req);
 	struct scatterlist * aux;
 	s805_init_desc * init_nfo;
 	int len, j = 0;
@@ -287,28 +276,33 @@ static int s805_tdes_crypt_prep (struct ablkcipher_request *req, s805_tdes_mode 
 		j ++;
 	}
 
-	tx_desc = dmaengine_prep_dma_interrupt (&tdes_mgr->chan->vc.chan, 0);
+	rctx->tx_desc = dmaengine_prep_dma_interrupt (&tdes_mgr->chan->vc.chan, 0);
 
-	if (!tx_desc) {
+	if (!rctx->tx_desc) {
 		
 		dev_err(tdes_mgr->dev, "%s: Failed to allocate dma descriptor.\n", __func__);
 		kfree(init_nfo);
 		return -ENOMEM;
 	}
 
-	tx_desc = s805_scatterwalk (req->src, req->dst, init_nfo, tx_desc, true);
+	rctx->tx_desc = s805_scatterwalk (req->src, req->dst, init_nfo, rctx->tx_desc, true);
 
-	if (!tx_desc) {
+	if (!rctx->tx_desc) {
 		
 		dev_err(tdes_mgr->dev, "%s: Failed to allocate dma descriptors.\n", __func__);
+		kfree(init_nfo);
 		return -ENOMEM;
 		
 	}
 	
-	tx_desc->callback = (void *) &s805_tdes_crypt_handle_completion;
-	tx_desc->callback_param = (void *) req;
-		
-	return s805_tdes_crypt_schedule_job (tx_desc, ctx, dir);
+	kfree(init_nfo);
+	
+	rctx->tx_desc->callback = (void *) &s805_tdes_crypt_handle_completion;
+	rctx->tx_desc->callback_param = (void *) req;
+	rctx->dir = dir;
+	rctx->mode = mode;
+	
+	return s805_tdes_crypt_schedule_job (req);
 }
 
 static int s805_tdes_ecb_encrypt(struct ablkcipher_request *req) {

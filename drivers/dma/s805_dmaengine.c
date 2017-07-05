@@ -257,11 +257,21 @@ static s805_dtable * sg_init_desc (s805_dtable * cursor, s805_init_desc * init_n
 	}
 }
 
+void s805_close_desc (struct dma_async_tx_descriptor * tx_desc) {
+
+	struct s805_desc *d = to_s805_dma_desc(tx_desc);
+
+	/* Ensure that the last descriptor will interrupt us. */
+	list_entry(d->desc_list.prev, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
+	add_zeroed_tdesc(d);
+}
+
 struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 												   struct scatterlist * dst_sg,
 												   s805_init_desc * init_nfo,
 												   struct dma_async_tx_descriptor * tx_desc,
-												   bool last) {
+												   bool last)
+{
 	
 	struct s805_desc *d;
 	struct sg_info src_info, dst_info;
@@ -405,15 +415,8 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 		}
 	}
 
-	if (last) {
-		
-		/* Ensure that the last descriptor will interrupt us. */
-		list_entry(d->desc_list.prev, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
-		add_zeroed_tdesc(d);
-
-	}
-	
-	kfree (init_nfo);
+	if (last) 
+		s805_close_desc(tx_desc);
 	
 	return tx_desc;
 
@@ -430,7 +433,6 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 	}
 	
 	kfree(d);
-	kfree (init_nfo);
 	
 	return NULL;
 	
@@ -1335,6 +1337,7 @@ s805_dma_prep_sg (struct dma_chan *chan,
 				  struct scatterlist *src_sg, unsigned int src_nents,
 				  unsigned long flags)
 {
+	struct dma_async_tx_descriptor * tx_desc;
 	struct s805_desc *d;
 	struct s805_chan *c = to_s805_dma_chan(chan);
 	s805_init_desc * init_nfo;
@@ -1370,8 +1373,14 @@ s805_dma_prep_sg (struct dma_chan *chan,
 	d->c = c;
 	d->frames = 0;
 	INIT_LIST_HEAD(&d->desc_list);
+
+	tx_desc = vchan_tx_prep(&c->vc, &d->vd, flags);
 	
-    return s805_scatterwalk (src_sg, dst_sg, init_nfo, vchan_tx_prep(&c->vc, &d->vd, flags), true);
+    tx_desc = s805_scatterwalk (src_sg, dst_sg, init_nfo, tx_desc, true);
+
+	kfree (init_nfo);
+
+	return tx_desc;
 }
 
 struct dma_async_tx_descriptor *

@@ -1,11 +1,10 @@
 #include <linux/platform_device.h>
 #include <linux/module.h>
-#include <linux/crypto.h>
 #include <linux/random.h>
 #include <crypto/aes.h>
 #include <crypto/skcipher.h>
-#include <crypto/algapi.h>
 #include <linux/s805_dmac.h>
+#include <linux/s805_crypto.h>
 
 
 /* Registers & Bitmaps for the s805 DMAC AES algorithm. */
@@ -52,10 +51,9 @@ struct s805_aes_ctx {
 	spinlock_t lock;
 };
 
-struct s805_aes_job {
+struct s805_aes_reqctx {
 
     struct dma_async_tx_descriptor * tx_desc;
-	struct s805_aes_ctx * ctx;
 	struct list_head elem;
 };
 
@@ -122,6 +120,8 @@ static int s805_aes_cra_init(struct crypto_tfm *tfm)
 	spin_lock_init(&ctx->lock);
 	ctx->pending = 0;
 
+	tfm->crt_ablkcipher.reqsize = sizeof(struct s805_aes_reqctx);
+	
 	return 0;
 }
 
@@ -150,7 +150,8 @@ static int s805_aes_iv_gen (struct skcipher_givcrypt_request * skreq) {
 		get_random_bytes (skreq->giv, AES_BLOCK_SIZE);
 
 		aux = (u32 *)skreq->giv;
-		
+
+		/* Write IV to hw regs, allegedlly only for the beggining of the transaction, is this the right place? */
 		WR(aux[0], S805_AES_IV_0);
 		WR(aux[1], S805_AES_IV_1);
 		WR(aux[2], S805_AES_IV_2);
@@ -217,18 +218,20 @@ static int s805_aes_setkey(struct crypto_ablkcipher *tfm, const u8 *key,
 	return -ENOSYS;
 }
 
-static int s805_aes_crypt_launch_job (struct s805_aes_job * job) {
+static int s805_aes_crypt_launch_job (struct ablkcipher_request *req, bool chain) {
 
+	struct s805_aes_ctx *ctx = crypto_ablkcipher_ctx(crypto_ablkcipher_reqtfm(req));
+	struct s805_aes_reqctx *rctx = ablkcipher_request_ctx(req);
 	dma_cookie_t tx_cookie;
 
 	spin_lock(&aes_mgr->lock);
-	if (!aes_mgr->busy) {
+	if (!aes_mgr->busy || chain) {
 		aes_mgr->busy = true;
 		spin_unlock(&aes_mgr->lock);
 	
-		s805_aes_cpykey_to_hw ((const u32 *) job->ctx->key, job->ctx->keylen);
+		s805_aes_cpykey_to_hw ((const u32 *) ctx->key, ctx->keylen);
 		
-		tx_cookie = dmaengine_submit(job->tx_desc);
+		tx_cookie = dmaengine_submit(rctx->tx_desc);
 		
 		if(tx_cookie < 0) {
 			
@@ -239,17 +242,19 @@ static int s805_aes_crypt_launch_job (struct s805_aes_job * job) {
 		
 		dma_async_issue_pending(&aes_mgr->chan->vc.chan);
 		return 0;
-	}
+		
+	} else
+		spin_unlock(&aes_mgr->lock);
 	
 	return 1;
 	
 }
 
 static void s805_aes_crypt_handle_completion (void * req_ptr) {
-
-	struct s805_aes_job * job;
+	
 	struct ablkcipher_request *req = req_ptr;
 	struct s805_aes_ctx *ctx = crypto_ablkcipher_ctx(crypto_ablkcipher_reqtfm(req));
+	struct s805_aes_reqctx *job = ablkcipher_request_ctx(req);
 
 	spin_lock(&ctx->lock);
 	ctx->pending --;
@@ -258,47 +263,34 @@ static void s805_aes_crypt_handle_completion (void * req_ptr) {
 	req->base.complete(&req->base, 0);
 	
 	spin_lock(&aes_mgr->lock);
-	
-	job = list_first_entry (&aes_mgr->jobs, struct s805_aes_job, elem);
 	list_del(&job->elem);
-	
 	spin_unlock(&aes_mgr->lock);
-
-	kfree(job);
 	
-	job = list_first_entry_or_null (&aes_mgr->jobs, struct s805_aes_job, elem);
+	job = list_first_entry_or_null (&aes_mgr->jobs, struct s805_aes_reqctx, elem);
 
 	if (job)  
-		s805_aes_crypt_launch_job(job);
+		s805_aes_crypt_launch_job(to_ablkcipher_request(job), true);
 	else {
 		spin_lock(&aes_mgr->lock);
 		aes_mgr->busy = false;
 		spin_unlock(&aes_mgr->lock);
 	}
-	
 }
 
-static int s805_aes_crypt_schedule_job (struct dma_async_tx_descriptor * tx_desc, struct s805_aes_ctx *ctx) {
+static int s805_aes_crypt_schedule_job (struct ablkcipher_request *req) {
 
-	struct s805_aes_job * job = kzalloc(sizeof(struct s805_aes_job), GFP_NOWAIT);
-
-	if (!job) 	
-		return -ENOMEM;
+	struct s805_aes_ctx *ctx = crypto_ablkcipher_ctx(crypto_ablkcipher_reqtfm(req));
+	struct s805_aes_reqctx *rctx = ablkcipher_request_ctx(req);
 	
 	spin_lock(&ctx->lock);
 	ctx->pending ++;
 	spin_unlock(&ctx->lock);
-	
-	job->tx_desc = tx_desc;
-	job->ctx = ctx;
-	
+  	
 	spin_lock(&aes_mgr->lock);
-	
-	list_add_tail(&job->elem, &aes_mgr->jobs);
-	
+	list_add_tail(&rctx->elem, &aes_mgr->jobs);
 	spin_unlock(&aes_mgr->lock);
 		
-	return s805_aes_crypt_launch_job(job);
+	return s805_aes_crypt_launch_job(req, false);
 }
 
 static int s805_aes_crypt_get_key_type (uint keylen) {
@@ -318,7 +310,7 @@ static int s805_aes_crypt_get_key_type (uint keylen) {
 static int s805_aes_crypt_prep (struct ablkcipher_request *req, s805_aes_mode mode, s805_aes_dir dir) {
 
 	struct s805_aes_ctx *ctx = crypto_ablkcipher_ctx(crypto_ablkcipher_reqtfm(req));
-	struct dma_async_tx_descriptor * tx_desc;
+	struct s805_aes_reqctx *rctx = ablkcipher_request_ctx(req);
 	struct scatterlist * aux;
 	s805_init_desc * init_nfo;
 	int keytype;
@@ -363,27 +355,30 @@ static int s805_aes_crypt_prep (struct ablkcipher_request *req, s805_aes_mode mo
 		j ++;
 	}
 	
-	tx_desc = dmaengine_prep_dma_interrupt (&aes_mgr->chan->vc.chan, 0);
+	rctx->tx_desc = dmaengine_prep_dma_interrupt (&aes_mgr->chan->vc.chan, 0);
 
-	if (!tx_desc) {
+	if (!rctx->tx_desc) {
 		
 		dev_err(aes_mgr->dev, "%s: Failed to allocate dma descriptor.\n", __func__);
 		kfree(init_nfo);
 		return -ENOMEM;
 	}
 
-	tx_desc = s805_scatterwalk (req->src, req->dst, init_nfo, tx_desc, true);
+	rctx->tx_desc = s805_scatterwalk (req->src, req->dst, init_nfo, rctx->tx_desc, true);
 
-	if (!tx_desc) {
+	if (!rctx->tx_desc) {
 		
 		dev_err(aes_mgr->dev, "%s: Failed to allocate dma descriptors.\n", __func__);
+		kfree(init_nfo);
 		return -ENOMEM;
 	}
+
+	kfree(init_nfo);
 	
-	tx_desc->callback = (void *) &s805_aes_crypt_handle_completion;
-	tx_desc->callback_param = (void *) req;
+	rctx->tx_desc->callback = (void *) &s805_aes_crypt_handle_completion;
+	rctx->tx_desc->callback_param = (void *) req;
 		
-	return s805_aes_crypt_schedule_job (tx_desc, ctx);
+	return s805_aes_crypt_schedule_job (req);
 }
 
 static int s805_aes_ecb_encrypt(struct ablkcipher_request *req) {
