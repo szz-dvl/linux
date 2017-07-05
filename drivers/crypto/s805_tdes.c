@@ -296,7 +296,14 @@ static int s805_tdes_crypt_prep (struct ablkcipher_request *req, s805_tdes_mode 
 		return -ENOMEM;
 	}
 
-	s805_scatterwalk (req->src, req->dst, init_nfo, 0, tx_desc, true);
+	tx_desc = s805_scatterwalk (req->src, req->dst, init_nfo, tx_desc, true);
+
+	if (!tx_desc) {
+		
+		dev_err(tdes_mgr->dev, "%s: Failed to allocate dma descriptors.\n", __func__);
+		return -ENOMEM;
+		
+	}
 	
 	tx_desc->callback = (void *) &s805_tdes_crypt_handle_completion;
 	tx_desc->callback_param = (void *) req;

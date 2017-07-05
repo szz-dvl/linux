@@ -372,7 +372,13 @@ static int s805_aes_crypt_prep (struct ablkcipher_request *req, s805_aes_mode mo
 		return -ENOMEM;
 	}
 
-	s805_scatterwalk (req->src, req->dst, init_nfo, 0, tx_desc, true);
+	tx_desc = s805_scatterwalk (req->src, req->dst, init_nfo, tx_desc, true);
+
+	if (!tx_desc) {
+		
+		dev_err(aes_mgr->dev, "%s: Failed to allocate dma descriptors.\n", __func__);
+		return -ENOMEM;
+	}
 	
 	tx_desc->callback = (void *) &s805_aes_crypt_handle_completion;
 	tx_desc->callback_param = (void *) req;

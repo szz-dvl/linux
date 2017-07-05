@@ -260,22 +260,18 @@ static s805_dtable * sg_init_desc (s805_dtable * cursor, s805_init_desc * init_n
 struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 												   struct scatterlist * dst_sg,
 												   s805_init_desc * init_nfo,
-												   unsigned long flags,
-												   struct dma_async_tx_descriptor * old,
+												   struct dma_async_tx_descriptor * tx_desc,
 												   bool last) {
-
+	
 	struct s805_desc *d;
+	struct sg_info src_info, dst_info;
 	s805_dtable * temp, * desc_tbl;
 	unsigned int src_len, dst_len;
 	dma_addr_t src_addr, dst_addr;
 	int min_size, act_size, icg, next_icg, next_burst;
 	bool new_block;
-	struct sg_info src_info, dst_info;
-
-	if (old)
-		d = init_nfo->d = to_s805_dma_desc(old);
-	else
-		d = init_nfo->d;
+	
+	d = init_nfo->d = to_s805_dma_desc(tx_desc);
 	
 	desc_tbl = sg_init_desc (NULL, init_nfo);
 	
@@ -323,7 +319,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 		    min_size -= act_size;
 		}
 
-		/* Either src entry or dst entry are complete here.  */
+		/* Either src entry or dst entry or both are complete here.  */
 		
 		new_block = true;
 		
@@ -356,7 +352,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 			src_addr = src_info.cursor ? sg_dma_address(src_info.cursor) : 0;
 			
 		} else
-			new_block = false; /* Fake, just to make sure next block will be evaluated. */
+			new_block = false; /* Fake, just to make sure next block will be evaluated (if needed). */
 		
 		if (sg_ent_complete(&dst_info) && !new_block) {
 
@@ -419,7 +415,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 	
 	kfree (init_nfo);
 	
-	return old ? old : vchan_tx_prep(&d->c->vc, &d->vd, flags);
+	return tx_desc;
 
  error_allocation:
 	
@@ -1377,7 +1373,7 @@ s805_dma_prep_sg (struct dma_chan *chan,
 	d->frames = 0;
 	INIT_LIST_HEAD(&d->desc_list);
 	
-    return s805_scatterwalk (src_sg, dst_sg, init_nfo, flags, NULL, true);
+    return s805_scatterwalk (src_sg, dst_sg, init_nfo, vchan_tx_prep(&c->vc, &d->vd, flags), true);
 }
 
 struct dma_async_tx_descriptor *
