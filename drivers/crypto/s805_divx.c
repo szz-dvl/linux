@@ -5,28 +5,28 @@
 #include <linux/dma-mapping.h>
 #include <linux/s805_dmac.h>
 
-#define S805_DIVX_BLOCK_SIZE                 2 /*??*/
-#define S805_DIVX_CTRL                       P_NDMA_RIJNDAEL_CONTROL
-#define S805_DIVX_RK_FIFO                    P_NDMA_RIJNDAEL_RK_FIFO
+#define S805_DIVX_BLOCK_SIZE                        2 /*??*/
+#define S805_DIVX_CTRL                              P_NDMA_RIJNDAEL_CONTROL
+#define S805_DIVX_RK_FIFO                           P_NDMA_RIJNDAEL_RK_FIFO
 
-#define S805_DTBL_DIVX_POST_ENDIAN(type)     (type & 0x7)
-#define S805_CTRL_DIVX_NR_VALUE(val)         (val & 0xf)
-#define S805_CTRL_DIVX_PUSH_RK_FIFO          BIT(31)
+#define S805_DTBL_DIVX_POST_ENDIAN(type)            (type & 0x7)
+#define S805_CTRL_DIVX_NR_VALUE(val)                (val & 0xf)
+#define S805_CTRL_DIVX_PUSH_RK_FIFO                 BIT(31)
 
-#define S805_CTRL_DIVX_NR_VALUE_10           10
-#define S805_CTRL_DIVX_NR_VALUE_12           12
-#define S805_CTRL_DIVX_NR_VALUE_14           14
+#define S805_CTRL_DIVX_NR_VALUE_10                  10
+#define S805_CTRL_DIVX_NR_VALUE_12                  12
+#define S805_CTRL_DIVX_NR_VALUE_14                  14
 
-#ifdef CRYPTO_DEV_S805_DIVX_NR_10
-#define S805_CTRL_DIVX_NR_VALUE_CFG          S805_CTRL_DIVX_NR_VALUE_10
-#elif defined CRYPTO_DEV_S805_DIVX_NR_12
-#define S805_CTRL_DIVX_NR_VALUE_CFG          S805_CTRL_DIVX_NR_VALUE_12
-#elif defined CRYPTO_DEV_S805_DIVX_NR_14
-#define S805_CTRL_DIVX_NR_VALUE_CFG          S805_CTRL_DIVX_NR_VALUE_14
+#ifdef CONFIG_CRYPTO_DEV_S805_DIVX_NR_10
+#define S805_CTRL_DIVX_NR_VALUE_CFG                 S805_CTRL_DIVX_NR_VALUE_10
+#elif defined CONFIG_CRYPTO_DEV_S805_DIVX_NR_12
+#define S805_CTRL_DIVX_NR_VALUE_CFG                 S805_CTRL_DIVX_NR_VALUE_12
+#elif defined CONFIG_CRYPTO_DEV_S805_DIVX_NR_14
+#define S805_CTRL_DIVX_NR_VALUE_CFG                 S805_CTRL_DIVX_NR_VALUE_14
 #endif
 
 #ifndef S805_CTRL_DIVX_NR_VALUE_CFG
-#define S805_CTRL_DIVX_NR_VALUE_CFG          S805_CTRL_DIVX_NR_VALUE_12
+#define S805_CTRL_DIVX_NR_VALUE_CFG                 S805_CTRL_DIVX_NR_VALUE_12
 #endif
 
 struct s805_divx_mgr {
