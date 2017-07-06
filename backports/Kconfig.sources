@@ -22,3 +22,4 @@ source "$BACKPORT_DIR/net/mac802154/Kconfig"
 source "$BACKPORT_DIR/drivers/net/ieee802154/Kconfig"
 
 source "$BACKPORT_DIR/drivers/usb/class/Kconfig"
+source "$BACKPORT_DIR/crypto/Kconfig"

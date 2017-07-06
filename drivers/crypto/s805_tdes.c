@@ -442,11 +442,21 @@ static int s805_tdes_probe(struct platform_device *pdev)
 
 static int s805_tdes_remove(struct platform_device *pdev)
 {
+
+	int i, err, ret = 0;
+	
+	for (i = 0; i < ARRAY_SIZE(s805_tdes_algs); i++) {
+		err = crypto_unregister_alg(&s805_tdes_algs[i]);
+		if (err) {
+		    dev_err(tdes_mgr->dev, "s805 TDES: Error unregistering algorithms.\n");
+			ret = err;
+		}
+	}
 	
 	dma_release_channel ( &tdes_mgr->chan->vc.chan );
 	kfree(tdes_mgr);
-
-	return 0;
+	
+	return ret;
 }
 
 static struct platform_driver s805_tdes_driver = {

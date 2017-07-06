@@ -1,0 +1,21 @@
+
+#Cryptographic API Configuration
+
+menuconfig BACKPORT_CRYPTO
+	tristate "Cryptographic API (4.12.y)"
+	help
+	  This option provides the core Cryptographic API (4.12.y).
+
+if BACKPORT_CRYPTO
+
+config CRYPTO_ACOMP2
+	tristate
+	select CRYPTO_ALGAPI2
+
+config CRYPTO_ACOMP
+	tristate "Support for compression API (4.12.y)"
+	default y
+	select CRYPTO_ALGAPI
+	select CRYPTO_ACOMP2
+
+endif	# if BACKPORT_CRYPTO

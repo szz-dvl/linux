@@ -24,3 +24,4 @@ obj-$(CONFIG_CRYPTO_DEV_ATMEL_SHA) += atmel-sha.o
 obj-$(CONFIG_CRYPTO_DEV_S805_AES) += s805_aes.o
 obj-$(CONFIG_CRYPTO_DEV_S805_TDES) += s805_tdes.o
 obj-$(CONFIG_CRYPTO_DEV_S805_CRC) += s805_crc.o
+obj-$(CONFIG_CRYPTO_DEV_S805_DIVX) += s805_divx.o

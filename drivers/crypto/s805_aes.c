@@ -559,11 +559,20 @@ static int s805_aes_probe(struct platform_device *pdev)
 
 static int s805_aes_remove(struct platform_device *pdev)
 {
+	int i, err, ret = 0;
+	
+	for (i = 0; i < ARRAY_SIZE(s805_aes_algs); i++) {
+		err = crypto_unregister_alg(&s805_aes_algs[i]);
+		if (err) {
+		    dev_err(aes_mgr->dev, "s805 AES: Error unregistering algorithms.\n");
+			ret = err;
+		}
+	}
 	
 	dma_release_channel ( &aes_mgr->chan->vc.chan );
 	kfree(aes_mgr);
-
-	return 0;
+	
+	return ret;
 }
 
 static struct platform_driver s805_aes_driver = {

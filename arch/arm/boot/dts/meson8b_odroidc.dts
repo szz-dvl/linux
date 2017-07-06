@@ -95,6 +95,11 @@
 		compatible = "aml,amls805-crc";
 		status= "ok";
 	};
+
+	s805-divx {
+		compatible = "aml,amls805-divx";
+		status= "ok";
+	};
 	
    meson-rng {
         compatible = "amlogic,meson-rng";

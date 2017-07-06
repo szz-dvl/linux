@@ -424,7 +424,8 @@ static int s805_crc_probe(struct platform_device *pdev)
 
 static int s805_crc_remove(struct platform_device *pdev)
 {
-	
+
+	crypto_unregister_ahash(&crc_alg);
 	dma_release_channel ( &crc_mgr->chan->vc.chan );
 	kfree(crc_mgr);
 	
