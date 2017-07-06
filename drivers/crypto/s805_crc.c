@@ -203,7 +203,7 @@ static int s805_crc_init_ctx (struct ahash_request *req) {
 	ctx->tx_desc->callback = (void *) &s805_crc_handle_completion;
 	ctx->tx_desc->callback_param = (void *) req;
 	
-	ctx->init_nfo = kzalloc(sizeof(struct s805_desc), GFP_NOWAIT); /* Must we allow atomic context here? */
+	ctx->init_nfo = kzalloc(sizeof(s805_init_desc), GFP_NOWAIT); /* Must we allow atomic context here? */
 
 	if (!ctx->init_nfo) {
 	    dev_err(crc_mgr->dev, "%s: Failed to allocate initialization info structure.\n", __func__);

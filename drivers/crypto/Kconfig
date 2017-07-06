@@ -58,6 +58,22 @@ config CRYPTO_DEV_S805_DIVX
 	  
 	  The driver is being developed at this moment, so say Y if
 	  you want to lend a hand, otherwise say N.
+
+choice
+		prompt "Choice noise reduction value for DivX decompression"
+		depends on CRYPTO_DEV_S805_DIVX
+		default CRYPTO_DEV_S805_DIVX_NR_12
+		
+config CRYPTO_DEV_S805_DIVX_NR_10
+        bool "10"
+
+config CRYPTO_DEV_S805_DIVX_NR_12
+	    bool "12"
+
+config CRYPTO_DEV_S805_DIVX_NR_14
+        bool "14"
+
+endchoice
 	  
 config CRYPTO_DEV_PADLOCK
 	tristate "Support for VIA PadLock ACE"

@@ -318,7 +318,7 @@ static int s805_aes_crypt_prep (struct ablkcipher_request *req, s805_aes_mode mo
 	
 	
 	/* Allocate and setup the information for descriptor initialization */
-	init_nfo = kzalloc(sizeof(struct s805_desc), GFP_NOWAIT); /* May we do this with GFP_KERNEL?? */
+	init_nfo = kzalloc(sizeof(s805_init_desc), GFP_NOWAIT); /* May we do this with GFP_KERNEL?? */
 
 	if (!init_nfo) {
 	    dev_err(aes_mgr->dev, "%s: Failed to allocate initialization info structure.\n", __func__);
@@ -377,7 +377,9 @@ static int s805_aes_crypt_prep (struct ablkcipher_request *req, s805_aes_mode mo
 	
 	rctx->tx_desc->callback = (void *) &s805_aes_crypt_handle_completion;
 	rctx->tx_desc->callback_param = (void *) req;
-		
+
+	req->base.data = req->dst; /* To easily recover the result from completion callback. */
+	
 	return s805_aes_crypt_schedule_job (req);
 }
 

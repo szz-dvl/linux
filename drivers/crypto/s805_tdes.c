@@ -249,7 +249,7 @@ static int s805_tdes_crypt_prep (struct ablkcipher_request *req, s805_tdes_mode 
 	
 	
 	/* Allocate and setup the information for descriptor initialization */
-	init_nfo = kzalloc(sizeof(struct s805_desc), GFP_NOWAIT); /* May we do this with GFP_KERNEL?? */
+	init_nfo = kzalloc(sizeof(s805_init_desc), GFP_NOWAIT); /* May we do this with GFP_KERNEL?? */
 
 	if (!init_nfo) {
 	    dev_err(tdes_mgr->dev, "%s: Failed to allocate initialization info structure.\n", __func__);
@@ -301,6 +301,8 @@ static int s805_tdes_crypt_prep (struct ablkcipher_request *req, s805_tdes_mode 
 	rctx->tx_desc->callback_param = (void *) req;
 	rctx->dir = dir;
 	rctx->mode = mode;
+
+	req->base.data = req->dst; /* To easily recover the result from completion callback. */
 	
 	return s805_tdes_crypt_schedule_job (req);
 }

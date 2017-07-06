@@ -167,8 +167,10 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 												   struct dma_async_tx_descriptor * tx_desc,
 												   bool last);
 
-void s805_close_desc (struct dma_async_tx_descriptor * tx_desc);
+void s805_close_desc (struct dma_async_tx_descriptor * tx_desc);     /* CRC  */
+void s805_desc_early_free (struct dma_async_tx_descriptor * tx_desc);/* DIVX */
 
 s805_dtable * sg_aes_move_along (s805_dtable * cursor, s805_init_desc * init_nfo);
 s805_dtable * sg_tdes_move_along (s805_dtable * cursor, s805_init_desc * init_nfo);
 s805_dtable * sg_crc_move_along (s805_dtable * cursor, s805_init_desc * init_nfo);
+s805_dtable * sg_divx_move_along (s805_dtable * cursor, s805_init_desc * init_nfo);

@@ -257,6 +257,16 @@ static s805_dtable * sg_init_desc (s805_dtable * cursor, s805_init_desc * init_n
 	}
 }
 
+/* Public functions, for crypto modules */
+static void s805_dma_desc_free(struct virt_dma_desc *vd);
+
+void s805_desc_early_free (struct dma_async_tx_descriptor * tx_desc) {
+
+	struct s805_desc *d = to_s805_dma_desc(tx_desc);
+
+	s805_dma_desc_free(&d->vd);
+}
+
 void s805_close_desc (struct dma_async_tx_descriptor * tx_desc) {
 
 	struct s805_desc *d = to_s805_dma_desc(tx_desc);
@@ -438,6 +448,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 	
 }
 
+/* END of Public functions, for crypto modules */
 /* END of Auxiliar functions for DMA_SG */
 
 /* 
