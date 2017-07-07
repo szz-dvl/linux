@@ -50,7 +50,7 @@
 
 #define S805_DTBL_SRC_HOLD               BIT(26) 
 #define S805_DTBL_DST_HOLD               BIT(25)
-#define S805_DTBL_NO_BREAK               BIT(8)                
+#define S805_DTBL_NO_BREAK               BIT(8) /* To be tested */               
 
 struct s805_dmadev 
 {
@@ -252,6 +252,8 @@ static s805_dtable * sg_init_desc (s805_dtable * cursor, s805_init_desc * init_n
 		return sg_tdes_move_along (cursor, init_nfo);
 	case CRC_DESC:
 		return sg_crc_move_along (cursor, init_nfo);
+	case DIVX_DESC:
+		return sg_divx_move_along (cursor, init_nfo);
 	default:
 		return NULL;
 	}

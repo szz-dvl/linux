@@ -675,11 +675,37 @@ static inline struct dma_async_tx_descriptor *dmaengine_prep_interleaved_dma(
 	return chan->device->device_prep_interleaved_dma(chan, xt, flags);
 }
 
+#ifdef CONFIG_S805_DMAC
 static inline struct dma_async_tx_descriptor *dmaengine_prep_dma_interrupt(
 		struct dma_chan *chan, unsigned long flags)
 {
 	return chan->device->device_prep_dma_interrupt(chan, flags);
 }
+
+static inline struct dma_async_tx_descriptor *dmaengine_prep_dma_memset(
+					  struct dma_chan *chan, dma_addr_t dest, int value, size_t len,
+					  unsigned long flags)
+{
+	return chan->device->device_prep_dma_memset(chan, dest, value, len, flags);
+	
+}
+
+static inline struct dma_async_tx_descriptor *dmaengine_prep_dma_memcpy(
+		struct dma_chan *chan, dma_addr_t dest, dma_addr_t src,
+		size_t len, unsigned long flags)
+{
+	return chan->device->device_prep_dma_memcpy(chan, dest, src, len, flags);
+}
+
+static inline struct dma_async_tx_descriptor *dmaengine_prep_dma_sg(
+		struct dma_chan *chan,
+		struct scatterlist *dst_sg, unsigned int dst_nents,
+		struct scatterlist *src_sg, unsigned int src_nents,
+		unsigned long flags)
+{
+	return chan->device->device_prep_dma_sg(chan, dst_sg, dst_nents, src_sg, src_nents, flags);
+}
+#endif
 
 static inline int dmaengine_terminate_all(struct dma_chan *chan)
 {

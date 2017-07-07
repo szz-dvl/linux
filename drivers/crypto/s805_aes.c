@@ -213,7 +213,7 @@ static int s805_aes_setkey(struct crypto_ablkcipher *tfm, const u8 *key,
 		
 	} else
 		spin_unlock(&ctx->lock);
-
+	
 	dev_err(aes_mgr->dev, "%s: s805 AES engine is busy, please wait till all the pending jobs (%u) finish.\n", __func__, ctx->pending);
 	return -ENOSYS;
 }

@@ -3,6 +3,7 @@
 
 menuconfig BACKPORT_CRYPTO
 	tristate "Cryptographic API (4.12.y)"
+	default y
 	help
 	  This option provides the core Cryptographic API (4.12.y).
 
