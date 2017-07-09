@@ -70,6 +70,14 @@ typedef enum tdes_dir {
     TDES_DIR_DECRYPT
 } s805_tdes_dir;
 
+typedef enum s805_dma_status {
+	S805_DMA_SUCCESS,
+	S805_DMA_IN_PROGRESS,
+	S805_DMA_PAUSED,
+	S805_DMA_ERROR,
+	S805_DMA_TERMINATED
+} s805_status;
+
 /* S805 Datasheet p.57 */
 struct s805_table_desc 
 {
@@ -116,10 +124,6 @@ struct s805_desc {
 
 	/* For transactions with more than S805_DMA_MAX_DESC data chunks. */
 	s805_dtable * next;
-
-	/* Boolean to mark transactions as terminated. */
-    bool terminated;
-	
 };
 
 typedef struct s805_chan {
@@ -129,11 +133,14 @@ typedef struct s805_chan {
 	/* Channel configuration, needed for slave_sg and cyclic transfers. */
 	struct dma_slave_config cfg;
 
-	/* Status of the channel either DMA_PAUSE or DMA_IN_PROGRESS, DMA_SUCCESS if inactive channel. */
-	enum dma_status status;        	
+	/* Status of the channel either DMA_PAUSE ,DMA_IN_PROGRESS, DMA_SUCCESS or DMA_TERMINATED if terminated channel. */
+    s805_status status;        	
 
 	/* DMA pool. */
-	struct dma_pool *pool;        
+	struct dma_pool *pool;
+
+	/* Pending transactions for the channel */
+	int pending;
 	
 } s805_chan;
 

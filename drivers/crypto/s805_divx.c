@@ -178,6 +178,8 @@ static int s805_divx_decompress (struct acomp_req *req) {
 	uint len;
 	int j = 0;
 
+	/* NOT VALID! */
+
 	if (req->dst) {
 
 		dev_err(divx_mgr->dev, "%s: Dst address already allocated, aborting.\n", __func__);
@@ -207,7 +209,7 @@ static int s805_divx_decompress (struct acomp_req *req) {
 	
 	for_each_sg(req->src, aux_src, sg_nents(req->src), j) {
 
-		len = sg_dma_len(aux_src);
+		len = sg_dma_len(aux_src) * 10; /* DivX compression ratio is about ten time the original size ... is this correct?? 8-| */
 		
 	    ctx->cursor = kzalloc(sizeof(struct s805_divx_chain), GFP_NOWAIT);
 
