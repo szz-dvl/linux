@@ -230,11 +230,11 @@ static int s805_aes_crypt_launch_job (struct ablkcipher_request *req, bool chain
 		spin_unlock(&aes_mgr->lock);
 	
 		s805_aes_cpykey_to_hw ((const u32 *) ctx->key, ctx->keylen);
-		
+
 		tx_cookie = dmaengine_submit(rctx->tx_desc);
 		
 		if(tx_cookie < 0) {
-			
+		
 			dev_err(aes_mgr->dev, "%s: Failed to get cookie.\n", __func__);
 			return tx_cookie;
 			

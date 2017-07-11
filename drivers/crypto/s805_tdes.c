@@ -185,7 +185,7 @@ static int s805_tdes_crypt_launch_job (struct ablkcipher_request *req, bool chai
 		spin_unlock(&tdes_mgr->lock);
 		
 		s805_tdes_set_hw_regs (req);
-	
+
 		tx_cookie = dmaengine_submit(rctx->tx_desc);
 	
 		if(tx_cookie < 0) {
@@ -194,7 +194,7 @@ static int s805_tdes_crypt_launch_job (struct ablkcipher_request *req, bool chai
 			return tx_cookie;
 		
 		}
-
+	
 		dma_async_issue_pending(&tdes_mgr->chan->vc.chan);
 
 		return 0;

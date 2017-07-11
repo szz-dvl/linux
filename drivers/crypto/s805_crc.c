@@ -94,22 +94,23 @@ s805_dtable * sg_crc_move_along (s805_dtable * cursor, s805_init_desc * init_nfo
 }
 
 static int s805_crc_launch_job (struct s805_crc_reqctx *ctx, bool chain) {
-	
-	dma_cookie_t tx_cookie;
 
+	dma_cookie_t tx_cookie;
+	
 	spin_lock(&crc_mgr->lock);
 	if (!crc_mgr->busy || chain) {
 		crc_mgr->busy = true;
 		spin_unlock(&crc_mgr->lock);
 
 		ctx->finalized = true;
+
 		tx_cookie = dmaengine_submit(ctx->tx_desc);
-		
+			
 		if(tx_cookie < 0) {
 			
 			dev_err(crc_mgr->dev, "%s: Failed to get cookie.\n", __func__);
 			return tx_cookie;
-			
+				
 		}
 		
 		dma_async_issue_pending(&crc_mgr->chan->vc.chan);
@@ -202,7 +203,7 @@ static int s805_crc_init_ctx (struct ahash_request *req) {
 
 	ctx->tx_desc->callback = (void *) &s805_crc_handle_completion;
 	ctx->tx_desc->callback_param = (void *) req;
-	
+
 	ctx->init_nfo = kzalloc(sizeof(s805_init_desc), GFP_NOWAIT); /* Must we allow atomic context here? */
 
 	if (!ctx->init_nfo) {

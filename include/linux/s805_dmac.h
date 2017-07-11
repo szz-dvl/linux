@@ -9,8 +9,11 @@
 
 #define S805_DTBL_INLINE_TYPE(type)      ((type & 0x7) << 22)
 #define S805_DTBL_PRE_ENDIAN(type)       ((type & 0x7) << 27)
+
 #define S805_DMA_MAX_DESC                127
 #define S805_DTBL_IRQ                    BIT(21)
+#define S805_DTBL_SRC_HOLD               BIT(26) 
+#define S805_DTBL_DST_HOLD               BIT(25)
 
 /* S805 Datasheet p.58 */
 typedef enum inline_types {
@@ -124,6 +127,13 @@ struct s805_desc {
 
 	/* For transactions with more than S805_DMA_MAX_DESC data chunks. */
 	s805_dtable * next;
+
+	/* For cyclic transactions. */
+	uint cycle_periods;
+	uint cycles;
+    uint cb_ready;
+	rwlock_t rwlock;
+	struct list_head cycle;
 };
 
 typedef struct s805_chan {
@@ -175,7 +185,6 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 												   bool last);
 
 void s805_close_desc (struct dma_async_tx_descriptor * tx_desc);     /* CRC  */
-void s805_desc_early_free (struct dma_async_tx_descriptor * tx_desc);/* DIVX */
 
 s805_dtable * sg_aes_move_along (s805_dtable * cursor, s805_init_desc * init_nfo);
 s805_dtable * sg_tdes_move_along (s805_dtable * cursor, s805_init_desc * init_nfo);

@@ -40,17 +40,9 @@ struct s805_divx_mgr {
 	
 };
 
-struct s805_divx_chain {
-
-	struct dma_async_tx_descriptor * tx_desc;
-	dma_addr_t rk_fifo; /* Source address of DivX compressed data? */
-	
-	struct s805_divx_chain * next;
-};
-
 struct s805_divx_reqctx {
 
-	struct s805_divx_chain * cursor;
+    struct dma_async_tx_descriptor * tx_desc;
 	struct list_head elem;
 };
 
@@ -85,7 +77,16 @@ static s805_dtable * def_init_divx_tdesc (unsigned int frames)
 	/* Control common part */
 	desc_tbl->table->control |= S805_DTBL_PRE_ENDIAN(ENDIAN_NO_CHANGE);
 	desc_tbl->table->control |= S805_DTBL_INLINE_TYPE(INLINE_DIVX);
-
+	
+	/* 
+	   We fix dst address to point to RK_FIFO register, is this correct? 
+	   will the device be able to move data in chunks of 4 Bytes? 
+	   will the FIFO consume the usual 8 Bytes quick enough? 
+	*/
+	
+	desc_tbl->table->control |= S805_DTBL_DST_HOLD;
+	desc_tbl->table->dst = S805_DIVX_RK_FIFO;
+	
 	if (!((frames + 1) % S805_DMA_MAX_DESC))
 		desc_tbl->table->control |= S805_DTBL_IRQ;
 
@@ -116,10 +117,9 @@ static int s805_divx_launch_job (struct s805_divx_reqctx *ctx, bool chain) {
 		spin_unlock(&divx_mgr->lock);
 
 		/* I'm guessing that NR value refers to "noise reduction", in "crypto/Kconfig" are offered the available values, only at kernel compile time. */
-		WR(ctx->cursor->rk_fifo, S805_DIVX_RK_FIFO);
 		WR(S805_CTRL_DIVX_NR_VALUE(S805_CTRL_DIVX_NR_VALUE_CFG) | S805_CTRL_DIVX_PUSH_RK_FIFO, S805_DIVX_CTRL);
 			
-		tx_cookie = dmaengine_submit(ctx->cursor->tx_desc);
+		tx_cookie = dmaengine_submit(ctx->tx_desc);
 		
 		if(tx_cookie < 0) {
 			
@@ -141,24 +141,15 @@ static void s805_divx_handle_completion (void * req_ptr) {
 	
     struct acomp_req *req = req_ptr;
 	struct s805_divx_reqctx * job = acomp_request_ctx(req);
-    struct s805_divx_chain * aux = job->cursor;
 	
-	if (job->cursor->next)
-
-		job->cursor = job->cursor->next;
+	/* Hopefully DivX decryption will happen in an "inline manner", so decrypted data will be in the src scatterlist provided by the user.*/
+	req->base.complete(&req->base, 0);
 		
-	else {
-
-		req->base.complete(&req->base, 0);
-		
-		spin_lock(&divx_mgr->lock);
-		list_del(&job->elem);
-		spin_unlock(&divx_mgr->lock);
-
-		job = list_first_entry_or_null (&divx_mgr->jobs, struct s805_divx_reqctx, elem);
-	}
-
-	kfree(aux);
+	spin_lock(&divx_mgr->lock);
+	list_del(&job->elem);
+	spin_unlock(&divx_mgr->lock);
+	
+	job = list_first_entry_or_null (&divx_mgr->jobs, struct s805_divx_reqctx, elem);
 	
 	if (job)  
 		s805_divx_launch_job(job, true);
@@ -173,20 +164,9 @@ static int s805_divx_decompress (struct acomp_req *req) {
 
 	struct s805_divx_reqctx *ctx = acomp_request_ctx(req);
 	s805_init_desc * init_nfo;
-	struct scatterlist * aux_src, * aux_dst;
-	struct s805_divx_chain * link, * aux;
-	uint len;
-	int j = 0;
-
-	/* NOT VALID! */
-
-	if (req->dst) {
-
-		dev_err(divx_mgr->dev, "%s: Dst address already allocated, aborting.\n", __func__);
-		return -EINVAL;
-		
-	}
-
+	
+	/* I'm missing a lot of info here, so I leave this implementation here and if any correction is needed, please apply it. */
+	
 	if (!req->src) {
 
 		dev_err(divx_mgr->dev, "%s: No data received, aborting.\n", __func__);
@@ -202,96 +182,27 @@ static int s805_divx_decompress (struct acomp_req *req) {
 	}
 
     init_nfo->type = DIVX_DESC;
-   
-    link = ctx->cursor;
-	sg_init_table (req->dst, sg_nents(req->src));
-	aux_dst = req->dst;
-	
-	for_each_sg(req->src, aux_src, sg_nents(req->src), j) {
 
-		len = sg_dma_len(aux_src) * 10; /* DivX compression ratio is about ten time the original size ... is this correct?? 8-| */
+	ctx->tx_desc = s805_scatterwalk (req->src, NULL, init_nfo, ctx->tx_desc, true);
+
+	if (!ctx->tx_desc) {
 		
-	    ctx->cursor = kzalloc(sizeof(struct s805_divx_chain), GFP_NOWAIT);
-
-		if (!ctx->cursor) {
+		dev_err(divx_mgr->dev, "%s: Failed to allocate data chunks.\n", __func__);
+		kfree(init_nfo);
+		return -ENOMEM;
 			
-			dev_err(divx_mgr->dev, "%s: Failed to allocate DivX link.\n", __func__);
-		    goto dma_mapping_error;
-		}
-
-	    ctx->cursor->rk_fifo = sg_dma_address(aux_src);
-	    ctx->cursor->tx_desc = dmaengine_prep_dma_interrupt (&divx_mgr->chan->vc.chan, 0);
-
-		if (!ctx->cursor->tx_desc) {
-		
-			dev_err(divx_mgr->dev, "%s: Failed to allocate dma descriptor %d.\n", __func__, j);
-			goto dma_mapping_error;
-			
-		}
-
-	    ctx->cursor->tx_desc->callback = (void *) &s805_divx_handle_completion;
-		ctx->cursor->tx_desc->callback_param = (void *) req;
-	
-		sg_set_buf(aux_dst,
-				   dma_alloc_coherent(divx_mgr->chan->vc.chan.device->dev,
-									  len,
-									  &sg_dma_address(aux_dst),
-									  GFP_ATOMIC), /* Memory won't be zeroed */
-				   len);
-	    
-		if (dma_mapping_error(divx_mgr->chan->vc.chan.device->dev, sg_dma_address(aux_dst))) {
-			
-			dev_err(divx_mgr->dev, "%s: Failed to allocate dst buffer.\n", __func__);
-			goto dma_mapping_error;
-		}
-
-		/* 
-		   Source adresses will be writed in the descriptors as well in the RK_FIFO register (at the moment of launching the job), 
-		   since I don't know where the hw will look for the value. 
-		*/
-	    ctx->cursor->tx_desc = s805_scatterwalk (aux_src, aux_dst, init_nfo, ctx->cursor->tx_desc, true);
-
-		if (!ctx->cursor->tx_desc) {
-		
-			dev_err(divx_mgr->dev, "%s: Failed to allocate data chunk %d.\n", __func__, j);
-			goto dma_mapping_error;
-			
-		}
-		
-	    ctx->cursor = ctx->cursor->next;
-		aux_dst = sg_next(aux_dst);
-		
 	}
 
-	ctx->cursor = link;
 	kfree (init_nfo);
-	req->base.data = req->dst; /* To easily recover the result from completion callback. */
 
+	ctx->tx_desc->callback = (void *) &s805_divx_handle_completion;
+	ctx->tx_desc->callback_param = (void *) req;
+		
 	spin_lock(&divx_mgr->lock);
 	list_add_tail(&ctx->elem, &divx_mgr->jobs);
 	spin_unlock(&divx_mgr->lock);
 	
 	return s805_divx_launch_job(ctx, false);
-
- dma_mapping_error:
-
-	aux_dst = req->dst;
-	
-	while (link) {
-
-		if (link->tx_desc)
-			s805_desc_early_free (link->tx_desc);
-
-		if (sg_dma_address(aux_dst) != DMA_ERROR_CODE) 
-			dma_free_coherent(divx_mgr->chan->vc.chan.device->dev, sg_dma_len(aux_dst), sg_virt(aux_dst), sg_dma_address(aux_dst));
-		
-		aux = link->next;
-		kfree(link);
-		
-		link = aux;
-	}
-	
-	return -ENOMEM;
 }
 
 static int s805_divx_init (struct crypto_acomp *tfm) {
@@ -299,16 +210,6 @@ static int s805_divx_init (struct crypto_acomp *tfm) {
 	tfm->reqsize = sizeof(struct s805_divx_reqctx); /* redundant? */
 
 	return 0;
-}
-
-static void s805_divx_dst_free (struct scatterlist *dst)
-{
-	struct scatterlist * aux;
-	uint j = 0;
-	
-	for_each_sg(dst, aux, sg_nents(dst), j)
-		dma_free_coherent(divx_mgr->chan->vc.chan.device->dev, sg_dma_len(aux), sg_virt(aux), sg_dma_address(aux));
-	
 }
 
 static void s805_divx_exit (struct crypto_acomp *tfm)
@@ -327,7 +228,6 @@ static int s805_divx_cra_init(struct crypto_tfm *tfm)
 
 static struct acomp_alg divx_alg = {
 	.decompress = s805_divx_decompress,
-	.dst_free   = s805_divx_dst_free,
 	.init       = s805_divx_init,
 	.exit       = s805_divx_exit,
 	.reqsize    = sizeof(struct s805_divx_reqctx),
