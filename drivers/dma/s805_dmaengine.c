@@ -41,7 +41,8 @@
 #define S805_DMA_DLST_END2               P_NDMA_THREAD_TABLE_END2
 #define S805_DMA_DLST_STR3               P_NDMA_THREAD_TABLE_START3
 #define S805_DMA_DLST_END3               P_NDMA_THREAD_TABLE_END3
-#define S805_DMA_ENABLE                  BIT(14)                 /* Both CTRL and CLK resides in the same bit */  
+#define S805_DMA_ENABLE                  BIT(14)                 /* Both CTRL and CLK resides in the same bit */
+#define S805_DMA_BUSY                    BIT(26)                 
 
 #define S805_DTBL_ADD_DESC               P_NDMA_TABLE_ADD_REG
 #define S805_DMA_ADD_DESC(th, cnt)       (((th & 0x3) << 8) | (cnt & 0xff))
@@ -65,14 +66,12 @@ struct s805_dmadev
 	struct list_head completed;               /* List of descriptors completed. */
 
 	struct list_head cyclics;                 /* List of cyclic descriptors in progress. */
-	struct list_head cyclics_done;            /* List of cyclic descriptors completed. */
 	
 	struct tasklet_struct tasklet_cyclic;     /* Tasklet for processing cyclic callbacks. */
 	struct tasklet_struct tasklet_completed;  /* Tasklet for bh processing of interrupts. */
-
-	rwlock_t rwlock;
 	
 	uint pending_irqs;
+	bool cyclic_busy;
 	bool busy;
 };
 
@@ -1721,6 +1720,36 @@ static inline void s805_dma_enable_hw ( void ) {
 	
 }
 
+static inline void s805_dma_disable_hw ( void ) {
+
+	uint i;
+	u32 status;
+
+	for (i = 0; i < S805_DMA_MAX_THREAD; i++)
+		s805_dma_thread_disable(i);
+
+	for (i = 0; i < S805_DMA_MAX_THREAD; i++)
+		WR(S805_DMA_ADD_DESC(i, 0x00), S805_DTBL_ADD_DESC);
+	
+	WR(1, CBUS_REG_ADDR(0x2271));
+	
+    status = RD(S805_DMA_CLK);
+	WR(status & ~S805_DMA_ENABLE, S805_DMA_CLK);
+
+	status = RD(S805_DMA_CTRL);
+	WR(status & ~S805_DMA_ENABLE, S805_DMA_CTRL);
+	
+}
+
+static inline void s805_dma_hard_reset ( void ) {
+	
+	if (RD(S805_DMA_CTRL) & S805_DMA_BUSY) {
+
+		s805_dma_disable_hw();
+		s805_dma_enable_hw();
+	}
+}
+
 /* Function passed to virtual channels to free resources */
 static void s805_dma_desc_free(struct virt_dma_desc *vd)
 {
@@ -1865,7 +1894,7 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 		d->c->pending ++;
 
 		if (d->cycle_periods)
-			list_add_tail(&d->cycle, &mgr->cyclics_done);
+			list_add_tail(&d->cycle, &mgr->cyclics);
 		
 #ifdef DEBUG
 
@@ -1937,19 +1966,33 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 
 		s805_dma_thread_disable(thread);
 		
-		d = list_first_entry_or_null(&mgr->scheduled, struct s805_desc, elem);
+	    d = list_first_entry_or_null(&mgr->scheduled, struct s805_desc, elem);
 		
 		while (d) {
 			
-			if (d->c->status != S805_DMA_PAUSED && d->c->status != S805_DMA_TERMINATED)
-				break;
-			else {
+			if (d->c->status != S805_DMA_PAUSED && d->c->status != S805_DMA_TERMINATED) {
 
+				if (d->cycle_periods) {
+
+					if (!mgr->cyclic_busy) {
+						
+						mgr->cyclic_busy = true;
+						break;
+						
+					} else
+						goto next;
+
+				} else
+					break;
+				
+			} else {
+
+			next:
 				aux = d;
 				
 				if (list_is_last(&d->elem, &mgr->scheduled))
 				    d = NULL;
-				else
+				else 
 					d = list_next_entry(d, elem);
 
 				if (aux->c->status == S805_DMA_TERMINATED) {
@@ -1957,15 +2000,13 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 					list_del(&aux->elem);
 					s805_dma_desc_free(&aux->vd);
 				}
+				
 			}			
 		}
 		
 		if (d) {
 
-			if (d->cycle_periods)
-				list_move_tail(&d->elem, &mgr->cyclics);
-			else
-				list_move_tail(&d->elem, &mgr->in_progress);
+			list_move_tail(&d->elem, &mgr->in_progress);
 			
 			d->next = s805_dma_allocate_tr (thread,
 										    list_first_entry(&d->desc_list, s805_dtable, elem),
@@ -1973,7 +2014,7 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 			
 		    d->c->status = S805_DMA_IN_PROGRESS;
 			
-			mgr->pending_irqs ++;
+			//mgr->pending_irqs ++;
 			
 			thread_mask |= (1 << thread);
 			
@@ -1983,7 +2024,7 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 	
 	for (thread = 0; thread < S805_DMA_MAX_THREAD; thread ++) {
 
-		if ((thread <= ini_thread) || (thread_mask & (1 << thread)))
+		if ((thread < ini_thread) || (thread_mask & (1 << thread)))
 			s805_dma_thread_enable(thread);
 		else
 			s805_dma_thread_disable(thread);
@@ -2032,6 +2073,8 @@ static void s805_dma_process_completed ( unsigned long null )
 {
 	struct s805_desc * d, * temp, * next_cyclic, * root_cyclic;
 	uint thread = 0;
+
+	s805_dma_hard_reset();
 	
 	list_for_each_entry_safe (d, temp, &mgr->completed, elem) {
 		
@@ -2053,20 +2096,21 @@ static void s805_dma_process_completed ( unsigned long null )
 						write_lock(&root_cyclic->rwlock);
 						root_cyclic->cb_ready ++;
 						write_unlock(&root_cyclic->rwlock);
+						mgr->cyclic_busy = false;
 						
 						tasklet_schedule(&mgr->tasklet_cyclic);
 						list_add_tail(&next_cyclic->elem, &mgr->scheduled);
 
 					} else if (next_cyclic->c->status != S805_DMA_PAUSED) {
 						
-						list_add_tail(&next_cyclic->elem, &mgr->cyclics);
+						list_add_tail(&next_cyclic->elem, &mgr->in_progress);
 						
 						/* Must always return 0 */
 						s805_dma_allocate_tr (thread,
 											  list_first_entry(&next_cyclic->desc_list, s805_dtable, elem),
 											  next_cyclic->frames);
 						
-						mgr->pending_irqs ++;
+						//mgr->pending_irqs ++;
 						
 						thread ++;
 						
@@ -2099,7 +2143,7 @@ static void s805_dma_process_completed ( unsigned long null )
 
 				if (d->c->status != S805_DMA_PAUSED) {
 					
-					mgr->pending_irqs ++;
+					//mgr->pending_irqs ++;
 					
 					list_move_tail(&d->elem, &mgr->in_progress);
 					
@@ -2138,7 +2182,7 @@ static void s805_cyclcic_callback ( unsigned long null ) {
 	void *cb_data = NULL;
 	uint periods, left;
 	
-	list_for_each_entry_safe (d, tmp, &mgr->cyclics_done, cycle) {
+	list_for_each_entry_safe (d, tmp, &mgr->cyclics, cycle) {
 
 		if (!d->cycle_periods) 
 			continue;
@@ -2189,14 +2233,17 @@ static void s805_cyclcic_callback ( unsigned long null ) {
 static irqreturn_t s805_dma_callback (int irq, void *data)
 {
 
-	preempt_disable();
+	struct s805_dmadev *m = data;
 	
-   	if ( ! --mgr->pending_irqs) {
+	preempt_disable();
 
-		list_splice_tail_init(&mgr->cyclics, &mgr->completed);
-		list_splice_tail_init(&mgr->in_progress, &mgr->completed);
-		tasklet_hi_schedule(&mgr->tasklet_completed);
-	}
+	list_move_tail (&list_first_entry(&m->in_progress,
+ 									  s805_dtable,
+ 									  elem)->elem,
+ 					&m->completed);
+
+	if (list_empty(&m->in_progress))
+		tasklet_hi_schedule(&m->tasklet_completed);
 	
 	preempt_enable();
 	
@@ -2533,14 +2580,12 @@ static int s805_dmamgr_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	
     spin_lock_init(&mgr->lock);
-	rwlock_init(&mgr->rwlock);
 	
 	INIT_LIST_HEAD(&mgr->scheduled);
 	INIT_LIST_HEAD(&mgr->in_progress);
 	INIT_LIST_HEAD(&mgr->completed);
 
 	INIT_LIST_HEAD(&mgr->cyclics);
-	INIT_LIST_HEAD(&mgr->cyclics_done);
 	
 	mgr->tasklet_completed = (struct tasklet_struct) { NULL, 0, ATOMIC_INIT(0), s805_dma_process_completed, 0 };
 	mgr->tasklet_cyclic = (struct tasklet_struct) { NULL, 0, ATOMIC_INIT(0), s805_cyclcic_callback, 0 };
