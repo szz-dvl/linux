@@ -1928,7 +1928,7 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 /* Fetch a new previously scheduled transaction. (Protected by mgr->lock)*/
 static void s805_dma_fetch_tr ( uint ini_thread ) {
 	
-	uint thread;
+	uint thread, thread_mask = 0;
 	struct s805_desc * d, * aux;
 	
 	mgr->busy = (ini_thread > 0);
@@ -1968,28 +1968,26 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 				list_move_tail(&d->elem, &mgr->in_progress);
 			
 			d->next = s805_dma_allocate_tr (thread,
-											d->next ? d->next : list_first_entry(&d->desc_list, s805_dtable, elem),
+										    list_first_entry(&d->desc_list, s805_dtable, elem),
 											d->frames);
 			
 		    d->c->status = S805_DMA_IN_PROGRESS;
 			
-			write_lock(&mgr->rwlock);
 			mgr->pending_irqs ++;
-			write_unlock(&mgr->rwlock);
 			
-			s805_dma_thread_enable(thread);
+			thread_mask |= (1 << thread);
 			
 		    mgr->busy = true;
-			
-		} else {
-			
-		  	s805_dma_thread_disable(thread); 
-			mgr->busy = (mgr->busy || false);
-		}
+		} 
 	}
 	
-	for (thread = 0; thread < ini_thread; thread ++)
-		s805_dma_thread_enable(thread);
+	for (thread = 0; thread < S805_DMA_MAX_THREAD; thread ++) {
+
+		if ((thread <= ini_thread) || (thread_mask & (1 << thread)))
+			s805_dma_thread_enable(thread);
+		else
+			s805_dma_thread_disable(thread);
+	}
 }
 
 
@@ -2057,9 +2055,9 @@ static void s805_dma_process_completed ( unsigned long null )
 						write_unlock(&root_cyclic->rwlock);
 						
 						tasklet_schedule(&mgr->tasklet_cyclic);
-					}
-					
-					if (next_cyclic->c->status != S805_DMA_PAUSED) {
+						list_add_tail(&next_cyclic->elem, &mgr->scheduled);
+
+					} else if (next_cyclic->c->status != S805_DMA_PAUSED) {
 						
 						list_add_tail(&next_cyclic->elem, &mgr->cyclics);
 						
@@ -2068,12 +2066,10 @@ static void s805_dma_process_completed ( unsigned long null )
 											  list_first_entry(&next_cyclic->desc_list, s805_dtable, elem),
 											  next_cyclic->frames);
 						
-						write_lock(&mgr->rwlock);
 						mgr->pending_irqs ++;
-						write_unlock(&mgr->rwlock);
 						
 						thread ++;
-				
+						
 					} else
 						list_add_tail(&next_cyclic->elem, &mgr->scheduled);
 					
@@ -2100,7 +2096,7 @@ static void s805_dma_process_completed ( unsigned long null )
 				d->frames -= S805_DMA_MAX_DESC;
 				
 				dev_dbg(d->c->vc.chan.device->dev, "Re-scheduling cookie %d, frames left: %u.\n", d->vd.tx.cookie, d->frames);
-				
+
 				if (d->c->status != S805_DMA_PAUSED) {
 					
 					mgr->pending_irqs ++;
@@ -2194,17 +2190,13 @@ static irqreturn_t s805_dma_callback (int irq, void *data)
 {
 
 	preempt_disable();
-
-    write_lock(&mgr->rwlock);
-	if ( ! --mgr->pending_irqs) {
-		write_unlock(&mgr->rwlock);
+	
+   	if ( ! --mgr->pending_irqs) {
 
 		list_splice_tail_init(&mgr->cyclics, &mgr->completed);
 		list_splice_tail_init(&mgr->in_progress, &mgr->completed);
 		tasklet_hi_schedule(&mgr->tasklet_completed);
-		
-	} else
-		write_unlock(&mgr->rwlock);
+	}
 	
 	preempt_enable();
 	
