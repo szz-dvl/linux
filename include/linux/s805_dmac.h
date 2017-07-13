@@ -1,11 +1,16 @@
 #include <linux/kernel.h>
 #include <linux/dmapool.h>
-#include <linux/dmaengine.h>
-#include <mach/am_regs.h>
 #include <../drivers/dma/virt-dma.h>
+
+#ifndef __S805_DMAC
+
+#include <mach/am_regs.h>
+#include <linux/dmaengine.h>
 
 #define WR(data, addr)  *(volatile unsigned long *)(addr)=data
 #define RD(addr)        *(volatile unsigned long *)(addr)
+
+#endif
 
 #define S805_DTBL_INLINE_TYPE(type)      ((type & 0x7) << 22)
 #define S805_DTBL_PRE_ENDIAN(type)       ((type & 0x7) << 27)
@@ -67,11 +72,6 @@ typedef enum tdes_mode {
 	TDES_MODE_ECB,
     TDES_MODE_CBC
 } s805_tdes_mode;
-
-typedef enum tdes_dir {
-	TDES_DIR_ENCRYPT,
-    TDES_DIR_DECRYPT
-} s805_tdes_dir;
 
 typedef enum s805_dma_status {
 	S805_DMA_SUCCESS,

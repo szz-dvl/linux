@@ -11,16 +11,15 @@
 #include <linux/spinlock.h>
 #include <linux/of.h>
 #include <linux/delay.h>
-#include <linux/interrupt.h>
 #include <linux/preempt.h>
-#include <mach/irqs.h>
+
+#include "s805_dmac.h"
 #include <linux/s805_dmac.h>
-
-
 
 #define S805_DMA_IRQ                     INT_NDMA
 #define S805_DMA_ALIGN_SIZE              sizeof(unsigned long long)
 #define S805_DMA_MIN_CYCLE_SIZE          CONFIG_S805_DMAC_MIN_CYCLE_SIZE
+#define S805_DMA_CYCLIC_TO               10  /* ms */
 
 /* Registers & Bitmaps for the s805 DMAC */
 
@@ -29,7 +28,6 @@
 #define S805_DMA_MAX_SKIP                (0xFFFF - (S805_DMA_ALIGN_SIZE - 1))
 #define S805_MAX_TR_SIZE                 (0x1FFFFFF - (S805_DMA_ALIGN_SIZE - 1)) 
 
-#define S805_DMA_CTRL                    P_NDMA_CNTL_REG0
 #define S805_DMA_THREAD_CTRL             P_NDMA_THREAD_REG
 #define S805_DMA_CLK                     P_HHI_GCLK_MPEG1
 
@@ -41,8 +39,8 @@
 #define S805_DMA_DLST_END2               P_NDMA_THREAD_TABLE_END2
 #define S805_DMA_DLST_STR3               P_NDMA_THREAD_TABLE_START3
 #define S805_DMA_DLST_END3               P_NDMA_THREAD_TABLE_END3
-#define S805_DMA_ENABLE                  BIT(14)                 /* Both CTRL and CLK resides in the same bit */
-#define S805_DMA_BUSY                    BIT(26)                 
+
+#define S805_DMA_BUSY                    BIT(26)
 
 #define S805_DTBL_ADD_DESC               P_NDMA_TABLE_ADD_REG
 #define S805_DMA_ADD_DESC(th, cnt)       (((th & 0x3) << 8) | (cnt & 0xff))
@@ -50,30 +48,7 @@
 #define S805_DMA_THREAD_INIT(th)         (1 << (24 + th))
 #define S805_DMA_THREAD_ENABLE(th)       (1 << (8 + th))
 
-#define S805_DTBL_NO_BREAK               BIT(8) /* To be tested */               
-
-struct s805_dmadev 
-{
-	struct dma_device ddev;
-	struct device_dma_parameters dma_parms;
-	
-	spinlock_t lock;                          /* General mgr lock. */
-	int irq_number;                           /* IRQ number. */
-    uint chan_available;                      /* Amount of channels available. */
-
-	struct list_head scheduled;               /* List of descriptors currently scheduled. */
-	struct list_head in_progress;             /* List of descriptors in progress. */
-	struct list_head completed;               /* List of descriptors completed. */
-
-	struct list_head cyclics;                 /* List of cyclic descriptors in progress. */
-	
-	struct tasklet_struct tasklet_cyclic;     /* Tasklet for processing cyclic callbacks. */
-	struct tasklet_struct tasklet_completed;  /* Tasklet for bh processing of interrupts. */
-	
-	uint pending_irqs;
-	bool cyclic_busy;
-	bool busy;
-};
+#define S805_DTBL_NO_BREAK               BIT(8) /* To be tested */
 
 struct memset_info {
 
@@ -95,7 +70,7 @@ static inline struct s805_desc *to_s805_dma_desc(struct dma_async_tx_descriptor 
 	return container_of(t, struct s805_desc, vd.tx);
 }
 
-static struct s805_dmadev *mgr;	    /* DMA manager ¿volatile? */
+struct s805_dmadev *mgr;
 static unsigned int dma_channels = 0;
 
 static const struct of_device_id s805_dma_of_match[] = 
@@ -1709,45 +1684,17 @@ static inline void s805_dma_enable_hw ( void ) {
 	u32 status = RD(S805_DMA_CLK);
 	WR(status | S805_DMA_ENABLE, S805_DMA_CLK);
 
-	status = RD(S805_DMA_CTRL);
-	WR(status & ~BIT(27), S805_DMA_CTRL);
 	
-    status = RD(S805_DMA_CTRL);
-	WR(status | S805_DMA_ENABLE, S805_DMA_CTRL);
+	status = RD(S805_DMA_CTRL);
+
+	status &= ~S805_DMA_DMA_PM;
+	status |= S805_DMA_ENABLE;
+	
+	WR(status, S805_DMA_CTRL);
 
 	for (i = 0; i < S805_DMA_MAX_THREAD; i++)
 		s805_dma_thread_disable(i);
 	
-}
-
-static inline void s805_dma_disable_hw ( void ) {
-
-	uint i;
-	u32 status;
-
-	for (i = 0; i < S805_DMA_MAX_THREAD; i++)
-		s805_dma_thread_disable(i);
-
-	for (i = 0; i < S805_DMA_MAX_THREAD; i++)
-		WR(S805_DMA_ADD_DESC(i, 0x00), S805_DTBL_ADD_DESC);
-	
-	WR(1, CBUS_REG_ADDR(0x2271));
-	
-    status = RD(S805_DMA_CLK);
-	WR(status & ~S805_DMA_ENABLE, S805_DMA_CLK);
-
-	status = RD(S805_DMA_CTRL);
-	WR(status & ~S805_DMA_ENABLE, S805_DMA_CTRL);
-	
-}
-
-static inline void s805_dma_hard_reset ( void ) {
-	
-	if (RD(S805_DMA_CTRL) & S805_DMA_BUSY) {
-
-		s805_dma_disable_hw();
-		s805_dma_enable_hw();
-	}
 }
 
 /* Function passed to virtual channels to free resources */
@@ -2021,6 +1968,9 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 		    mgr->busy = true;
 		} 
 	}
+
+	if (mgr->cyclic_busy)
+		s805_dma_to_start(S805_DMA_CYCLIC_TO);
 	
 	for (thread = 0; thread < S805_DMA_MAX_THREAD; thread ++) {
 
@@ -2031,7 +1981,6 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 	}
 }
 
-
 /* 
    Process, if existent, the next descriptor for a DMA channel
    
@@ -2041,6 +1990,8 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 static s805_status s805_dma_process_next_desc ( struct s805_chan *c )
 {
 
+	//dev_warn(c->vc.chan.device->dev, "%s: busy > %s\n", __func__, mgr->busy ? "true" : "false");
+	
 	if (c->status != S805_DMA_PAUSED && c->status != S805_DMA_TERMINATED) {
 
 		c->status = S805_DMA_IN_PROGRESS;
@@ -2073,8 +2024,10 @@ static void s805_dma_process_completed ( unsigned long null )
 {
 	struct s805_desc * d, * temp, * next_cyclic, * root_cyclic;
 	uint thread = 0;
-
-	s805_dma_hard_reset();
+	
+	//s805_dma_hard_reset();
+	if (mgr->cyclic_busy)
+		s805_dma_to_stop();
 	
 	list_for_each_entry_safe (d, temp, &mgr->completed, elem) {
 		
@@ -2164,7 +2117,9 @@ static void s805_dma_process_completed ( unsigned long null )
 				
 				d->cycle_periods = 0;
 				list_del(&d->cycle);
+				mgr->cyclic_busy = false;
 			}
+
 
 			s805_dma_desc_free(&d->vd);
 		}
@@ -2268,22 +2223,22 @@ static void s805_dma_dismiss_chann ( struct s805_chan * c ) {
 static s805_status s805_dma_chan_wait_for_pending (struct s805_chan * c) {
 
 	unsigned long now;
-	unsigned int to = 0, limit = 10;
+	unsigned int alive = 10;
 	
-	while (c->pending > 0 && to < limit) {
+	while (c->pending > 0 && alive) {
 		
 		/* Wait for the remaining part of the current jiffie. */
 		now = jiffies;
 		while (time_before(jiffies, now + 1))
 			cpu_relax();
 
-		to ++;
+		alive --;
 	}
 
-	if (to == limit)
+	if (!alive)
 		dev_err(c->vc.chan.device->dev, "%s: timed-out!\n", __func__);
 
-	return (to != limit) ? S805_DMA_SUCCESS : S805_DMA_ERROR;
+	return alive ? S805_DMA_SUCCESS : S805_DMA_ERROR;
 }
 
 /* Dismiss a previously scheduled descriptor -- protected by mgr->lock */
@@ -2340,6 +2295,8 @@ static int s805_dma_control (struct dma_chan *chan,
 				c->status = S805_DMA_ERROR;
 				
 			}
+
+			//mgr->busy = false; /* !! */
 			
 		}
 		break;;
@@ -2578,14 +2535,22 @@ static int s805_dmamgr_probe(struct platform_device *pdev)
 	mgr = devm_kzalloc(&pdev->dev, sizeof(struct s805_dmadev), GFP_KERNEL);
 	if (!mgr)
 		return -ENOMEM;
-	
-    spin_lock_init(&mgr->lock);
+
+	pdev->dev.dma_parms = &mgr->dma_parms;
+
+	/* Init internal structs */
+	mgr->ddev.dev = &pdev->dev;
+	INIT_LIST_HEAD(&mgr->ddev.channels);
+
+	spin_lock_init(&mgr->lock);
 	
 	INIT_LIST_HEAD(&mgr->scheduled);
 	INIT_LIST_HEAD(&mgr->in_progress);
 	INIT_LIST_HEAD(&mgr->completed);
 
 	INIT_LIST_HEAD(&mgr->cyclics);
+
+	rwlock_init(&mgr->rwlock);
 	
 	mgr->tasklet_completed = (struct tasklet_struct) { NULL, 0, ATOMIC_INIT(0), s805_dma_process_completed, 0 };
 	mgr->tasklet_cyclic = (struct tasklet_struct) { NULL, 0, ATOMIC_INIT(0), s805_cyclcic_callback, 0 };
@@ -2593,25 +2558,29 @@ static int s805_dmamgr_probe(struct platform_device *pdev)
 	dev_info(&pdev->dev, "DMA legacy API manager at 0x%p\n", mgr);
 	
 	mgr->irq_number = S805_DMA_IRQ;
+
+	if (s805_dma_to_init())
+		return 0;
 	
 	return request_irq(mgr->irq_number, s805_dma_callback, 0, "s805_dmaengine_irq", mgr);
 }
 
 
 /* Free DMA s805 device REVISAR */
-static void s805_dma_free(struct s805_dmadev *sd)
+static void s805_dma_free(struct s805_dmadev *m)
 {
 	/* Check for active descriptors. */
 	struct s805_chan *c, *next;
 
-	list_for_each_entry_safe(c, next, &sd->ddev.channels,
+	list_for_each_entry_safe(c, next, &m->ddev.channels,
 							 vc.chan.device_node) {
 		
 		list_del(&c->vc.chan.device_node);
 		tasklet_kill(&c->vc.task);
 	}
 
-	free_irq(mgr->irq_number, mgr);
+	free_irq(m->irq_number, m);
+	s805_dma_to_shutdown();
 	
 }
 
@@ -2630,7 +2599,6 @@ __setup("dma_channels=", get_chan_num_cmdline);
 static int s805_dma_probe (struct platform_device *pdev)
 {
 	
-	struct s805_dmadev *sd;
 	int ret, i;
 	
 	if (!pdev->dev.dma_mask)
@@ -2643,12 +2611,6 @@ static int s805_dma_probe (struct platform_device *pdev)
 	
 	dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
 	
-	/* S805 DMAC device */
-	sd = devm_kzalloc(&pdev->dev, sizeof(struct s805_dmadev), GFP_KERNEL);
-	
-	if (!sd)
-		return -ENOMEM;
-
 	ret = s805_dmamgr_probe(pdev);
 	
 	if (ret) 	
@@ -2670,8 +2632,6 @@ static int s805_dma_probe (struct platform_device *pdev)
 		}	
 	}
 	
-	pdev->dev.dma_parms = &sd->dma_parms;
-	
 	/* Datasheet p.57, entry 3 */
 	dma_set_max_seg_size(&pdev->dev, S805_MAX_TR_SIZE); // is this correct?
 	
@@ -2680,54 +2640,50 @@ static int s805_dma_probe (struct platform_device *pdev)
 	   to make them all public so we can give support to the async_tx api and network or audi drivers. 
 	*/
 
-	//dma_cap_set(DMA_PRIVATE, sd->ddev.cap_mask);
-	dma_cap_set(DMA_SLAVE, sd->ddev.cap_mask);
-	dma_cap_set(DMA_INTERRUPT, sd->ddev.cap_mask);
+	//dma_cap_set(DMA_PRIVATE, mgr->ddev.cap_mask);
+	dma_cap_set(DMA_SLAVE, mgr->ddev.cap_mask);
+	dma_cap_set(DMA_INTERRUPT, mgr->ddev.cap_mask);
 	
-	dma_cap_set(DMA_ASYNC_TX, sd->ddev.cap_mask);
-	dma_cap_set(DMA_INTERLEAVE, sd->ddev.cap_mask);
+	dma_cap_set(DMA_ASYNC_TX, mgr->ddev.cap_mask);
+	dma_cap_set(DMA_INTERLEAVE, mgr->ddev.cap_mask);
 
 	/* Those needs to be exposed in linux/dmaengine.h, maybe backported from 4.x */
-	dma_cap_set(DMA_CYCLIC, sd->ddev.cap_mask);
-	dma_cap_set(DMA_SG, sd->ddev.cap_mask);
-	dma_cap_set(DMA_MEMCPY,  sd->ddev.cap_mask);
-	dma_cap_set(DMA_MEMSET,  sd->ddev.cap_mask);
+	dma_cap_set(DMA_CYCLIC, mgr->ddev.cap_mask);
+	dma_cap_set(DMA_SG, mgr->ddev.cap_mask);
+	dma_cap_set(DMA_MEMCPY,  mgr->ddev.cap_mask);
+	dma_cap_set(DMA_MEMSET,  mgr->ddev.cap_mask);
 	
 	
 	/* Demanded by dmaengine interface: */ 
-	sd->ddev.device_tx_status = s805_dma_tx_status;
-	sd->ddev.device_issue_pending = s805_dma_issue_pending;
-	sd->ddev.device_control = s805_dma_control;
-	sd->ddev.device_alloc_chan_resources = s805_dma_alloc_chan_resources;
-	sd->ddev.device_free_chan_resources = s805_dma_free_chan_resources;
+	mgr->ddev.device_tx_status = s805_dma_tx_status;
+	mgr->ddev.device_issue_pending = s805_dma_issue_pending;
+	mgr->ddev.device_control = s805_dma_control;
+	mgr->ddev.device_alloc_chan_resources = s805_dma_alloc_chan_resources;
+	mgr->ddev.device_free_chan_resources = s805_dma_free_chan_resources;
 	
 	/* Capabilities: */
-	sd->ddev.device_prep_slave_sg = s805_dma_prep_slave_sg;
-	sd->ddev.device_prep_interleaved_dma = s805_dma_prep_interleaved;
-	sd->ddev.device_prep_dma_cyclic = s805_dma_prep_dma_cyclic;
-	sd->ddev.device_prep_dma_sg = s805_dma_prep_sg;
-	sd->ddev.device_prep_dma_memcpy = s805_dma_prep_memcpy;
-	sd->ddev.device_prep_dma_memset = s805_dma_prep_memset;
-	sd->ddev.device_prep_dma_interrupt = s805_dma_prep_interrupt;
+	mgr->ddev.device_prep_slave_sg = s805_dma_prep_slave_sg;
+	mgr->ddev.device_prep_interleaved_dma = s805_dma_prep_interleaved;
+	mgr->ddev.device_prep_dma_cyclic = s805_dma_prep_dma_cyclic;
+	mgr->ddev.device_prep_dma_sg = s805_dma_prep_sg;
+	mgr->ddev.device_prep_dma_memcpy = s805_dma_prep_memcpy;
+	mgr->ddev.device_prep_dma_memset = s805_dma_prep_memset;
+	mgr->ddev.device_prep_dma_interrupt = s805_dma_prep_interrupt;
 	
-	/* Init internal structs */
-	sd->ddev.dev = &pdev->dev;
-	INIT_LIST_HEAD(&sd->ddev.channels);
-	
-	platform_set_drvdata(pdev, sd);
+	platform_set_drvdata(pdev, mgr);
 	
     dev_info(&pdev->dev, "Entering s805 DMA engine probe, chan available: %u, IRQ: %u\n", mgr->chan_available, S805_DMA_IRQ);
 	
 	for (i = 0; i < mgr->chan_available; i++) {
 		
-	    if (s805_dma_chan_init(sd))
+	    if (s805_dma_chan_init(mgr))
 			goto err_no_dma;
 		
 	}
 	
 	dev_dbg(&pdev->dev, "Initialized %i DMA channels\n", i);
 	
-	ret = dma_async_device_register(&sd->ddev);
+	ret = dma_async_device_register(&mgr->ddev);
 	if (ret) {
 		dev_err(&pdev->dev,
 				"Failed to register slave DMA engine device: %d\n", ret);
@@ -2743,17 +2699,17 @@ static int s805_dma_probe (struct platform_device *pdev)
  err_no_dma:
 	
 	dev_err(&pdev->dev, "No DMA available.\n");
-	s805_dma_free(sd);
+	s805_dma_free(mgr);
 	
 	return ret;
 }
 
 static int s805_dma_remove(struct platform_device *pdev)
 {
-	struct s805_dmadev *sd = platform_get_drvdata(pdev);
+	struct s805_dmadev *m = platform_get_drvdata(pdev);
 
-	dma_async_device_unregister(&sd->ddev);
-	s805_dma_free(sd);
+	dma_async_device_unregister(&m->ddev);
+	s805_dma_free(m);
 
 	return 0;
 }

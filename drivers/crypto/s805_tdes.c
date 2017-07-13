@@ -22,6 +22,10 @@
 #define S805_CTRL_TDES_PUSH_MODE              BIT(30)
 #define S805_CTRL_TDES_PUSH_KEY(idx)          (BIT(31) | ((idx & 0x3) << 1))
 
+typedef enum tdes_dir {
+	TDES_DIR_ENCRYPT,
+    TDES_DIR_DECRYPT
+} s805_tdes_dir;
 
 struct s805_tdes_mgr {
 
