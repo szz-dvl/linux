@@ -14,12 +14,16 @@
 #define S805_DMA_TIMER_MAX            0xFFFF
 #define S805_DMA_TIMER_VAL(val)       (val & S805_DMA_TIMER_MAX)
 
-
+#define S805_DMA_RESET_CNT            CBUS_REG_ADDR(0x2271)
+#define S805_DMA_RESET_REG            P_RESET1_REGISTER
+#define S805_DMA_RESET                BIT(9)
+	
 static inline void s805_dma_hard_reset ( void ) {
 
 	u32 status;
 		
 	WR(S805_DMA_RESET, S805_DMA_RESET_REG);
+	WR(1, S805_DMA_RESET_CNT);
 	
 	status = RD(S805_DMA_CTRL);
 	

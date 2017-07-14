@@ -18,8 +18,7 @@
 
 #define S805_DMA_IRQ                     INT_NDMA
 #define S805_DMA_ALIGN_SIZE              sizeof(unsigned long long)
-#define S805_DMA_MIN_CYCLE_SIZE          CONFIG_S805_DMAC_MIN_CYCLE_SIZE
-#define S805_DMA_CYCLIC_TO               10  /* ms */
+#define S805_DMA_CYCLIC_TO               500  /* ms */
 
 /* Registers & Bitmaps for the s805 DMAC */
 
@@ -1110,7 +1109,7 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 	struct s805_desc *d;
 	dma_addr_t dst_addr, src_addr;
 	s805_dtable * desc_tbl, * temp;
-	unsigned int i, j, k, cycles, periods, next_bytes, frames_per_period, byte_count = 0, period_count = 0;
+	unsigned int i, j, periods, next_bytes, byte_count = 0, period_count = 0;
 	struct dma_async_tx_descriptor * root, * cursor;
 	bool addr_reset;
 	
@@ -1194,18 +1193,24 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 		dev_err(chan->device->dev, "%s: Unaligned period len: %u.\n", __func__, period_len);
 		return NULL;
 	}
+
+	periods = DIV_ROUND_UP(buf_len, period_len);
 	
-	if (buf_len % period_len)
-		dev_warn(chan->device->dev,
-				 "%s: buffer_length (%zd) is not a multiple of period_len (%zd).\n",
-				 __func__, buf_len, period_len);
+	if (buf_len % period_len) {
+		dev_err(chan->device->dev,
+				"%s: buffer_length (%zd) is not a multiple of period_len (%zd).\n",
+				__func__, buf_len, period_len);
+		
+		if ((periods * period_len) > buf_len)
+			return NULL;
+	}
 	
 	/* Is that warning fair? */
 	if (buf_len > S805_DMA_ALIGN_SIZE && direction == DMA_DEV_TO_DEV)
 		dev_warn(chan->device->dev,
 				 "%s: buffer_length (%u) is > S805_DMA_ALIGN_SIZE (%u) while direction is DMA_DEV_TO_DEV.\n",
 				 __func__, buf_len, S805_DMA_ALIGN_SIZE);
-	
+
 	/* Allocate and setup the root descriptor. */
 	d = kzalloc(sizeof(struct s805_desc), GFP_NOWAIT);
 	if (!d)
@@ -1213,12 +1218,7 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 
 	d->c = c;
 	d->frames = 0;
-	rwlock_init(&d->rwlock);
-    periods = d->cycle_periods = DIV_ROUND_UP(buf_len, period_len);
-	cycles = d->cycles = DIV_ROUND_UP(S805_DMA_MIN_CYCLE_SIZE, buf_len);
 	INIT_LIST_HEAD(&d->desc_list);
-
-	frames_per_period = DIV_ROUND_UP(period_len, S805_MAX_TR_SIZE);
 
 	root = vchan_tx_prep(&c->vc, &d->vd, flags);
 	cursor = root;
@@ -1231,83 +1231,64 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 		return NULL;
 		
 	}
-	
-	for (k = 0; k < cycles; k++) {
+			
+	for (i = 0; i < periods; i++) {
 		
-		for (i = 0; i < periods; i++) {
-
-			for (j = 0; j < period_len; j += S805_MAX_TR_SIZE) {
+		for (j = 0; j < period_len; j += S805_MAX_TR_SIZE) {
 				
-				next_bytes = min((period_len - j), (uint) S805_MAX_TR_SIZE);
+			next_bytes = min((period_len - j), (uint) S805_MAX_TR_SIZE);
 				
-				if ((desc_tbl->table->count + next_bytes) > S805_MAX_TR_SIZE) {
+			if ((desc_tbl->table->count + next_bytes) > S805_MAX_TR_SIZE) {
 					
-					list_add_tail(&desc_tbl->elem, &d->desc_list);
-					d->frames ++;
+				list_add_tail(&desc_tbl->elem, &d->desc_list);
+				d->frames ++;
 					
-					desc_tbl = cyclic_def_init_new_tdesc(c, src_addr, dst_addr, direction, byte_count, period_count, addr_reset, d->frames);
-					
-					if (!desc_tbl) 
-						goto error_list;
-					
-				}
-				
-				desc_tbl->table->count += next_bytes;
-				byte_count += next_bytes;
-				period_count += next_bytes;
-			}
-			
-			period_count = 0;
-
-			list_add_tail(&desc_tbl->elem, &d->desc_list);
-			d->frames ++;
-			
-			if (i < periods - 1) {
-				
-				if ((d->frames + frames_per_period) > S805_DMA_MAX_DESC) {
-					
-					add_zeroed_tdesc(d);
-					
-					d = kzalloc(sizeof(struct s805_desc), GFP_NOWAIT);
-					if (!d)
-						goto error_list;
-					
-					d->c = c;
-					d->frames = 0;
-					d->cycle_periods = periods;
-					d->cycles = cycles;
-					INIT_LIST_HEAD(&d->desc_list);
-				
-					cursor->next = vchan_tx_prep(&c->vc, &d->vd, flags);
-					cursor->parent = root; 
-				
-					cursor = cursor->next; /* Must be NULL in first instance, so "error_list" tag must be correct. */
-				}
-				
 				desc_tbl = cyclic_def_init_new_tdesc(c, src_addr, dst_addr, direction, byte_count, period_count, addr_reset, d->frames);
-			
+					
 				if (!desc_tbl) 
 					goto error_list;
-			}	
+					
+			}
+				
+			desc_tbl->table->count += next_bytes;
+			byte_count += next_bytes;
+			period_count += next_bytes;
 		}
 
-		if (k < cycles - 1) {
-
-			period_count = byte_count = 0;
+		/* Ensure that the last descriptor of the period will interrupt us. */
+		desc_tbl->table->control |= S805_DTBL_IRQ;
+ 
+		list_add_tail(&desc_tbl->elem, &d->desc_list);
+		d->frames ++;
 			
+		add_zeroed_tdesc(d);
+			
+		period_count = 0;
+			
+		if (i < periods - 1) {
+				
+			/* Allocate and setup the next descriptor. */
+			d = kzalloc(sizeof(struct s805_desc), GFP_NOWAIT);
+			if (!d)
+				goto error_list;
+			
+			d->c = c;
+			d->frames = 0;
+			INIT_LIST_HEAD(&d->desc_list);
+				
+			cursor->next = vchan_tx_prep(&c->vc, &d->vd, flags);
+			cursor->parent = root; 
+			
+			cursor = cursor->next; /* Must be NULL in first instance, so "error_list" tag must be correct. */
+				
 			desc_tbl = cyclic_def_init_new_tdesc(c, src_addr, dst_addr, direction, byte_count, period_count, addr_reset, d->frames);
-			
+				
 			if (!desc_tbl) 
 				goto error_list;
-		}
+		} else
+			cursor->parent = cursor->next = root; /* Close the descriptor chain. */	
 	}
-	
-	cursor->parent = cursor->next = root;
-
-	/* Ensure that the last descriptor will interrupt us. */
-	list_entry(d->desc_list.prev, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
-	add_zeroed_tdesc(d);
-	
+		
 	return root;
 	
  error_list:
@@ -1700,13 +1681,12 @@ static inline void s805_dma_enable_hw ( void ) {
 /* Function passed to virtual channels to free resources */
 static void s805_dma_desc_free(struct virt_dma_desc *vd)
 {
-
-	struct s805_desc * d = to_s805_dma_desc(&vd->tx), * aux;
-	s805_dtable * desc_tbl, * temp;
+	struct s805_desc * aux, * d = to_s805_dma_desc(&vd->tx);
 	struct dma_async_tx_descriptor * cursor, * me = &vd->tx;
-	bool cyclic = false;
+	s805_dtable * desc_tbl, * temp;
 	struct s805_chan * c = d->c;
-				
+	bool cyclic = false;
+	
 	if (me->next) {
 		
 		tasklet_disable(&c->vc.task); 
@@ -1743,9 +1723,10 @@ static void s805_dma_desc_free(struct virt_dma_desc *vd)
 		dma_free_coherent(d->c->vc.chan.device->dev, sizeof(long long), d->memset->value, d->memset->paddr);
 	
 	dev_dbg(d->c->vc.chan.device->dev, "Descriptor 0x%p: Freed.", me);
-
-	d->c->pending --;
+    
 	kfree(d);
+	
+	c->pending --;
 	
 	if (cyclic)
 		tasklet_enable(&c->vc.task);
@@ -1839,9 +1820,6 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 
 		d = to_s805_dma_desc(&vd->tx);
 		d->c->pending ++;
-
-		if (d->cycle_periods)
-			list_add_tail(&d->cycle, &mgr->cyclics);
 		
 #ifdef DEBUG
 
@@ -1885,7 +1863,7 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 		if (list_empty(&d->desc_list)) {
 			
 			/* 
-			   This descriptor comes from device_prep_interrupt, so mark the cookie as completed to trigger 
+			   This descriptor comes from device_prep_interrupt, and nobody has added info into it, so mark the cookie as completed to trigger 
 			   the associated callback, and try to process any pending descriptors.
 			*/
 			
@@ -1919,10 +1897,12 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 			
 			if (d->c->status != S805_DMA_PAUSED && d->c->status != S805_DMA_TERMINATED) {
 
-				if (d->cycle_periods) {
+				if (d->vd.tx.next) {
 
 					if (!mgr->cyclic_busy) {
-						/* to stop here */
+						
+						s805_dma_to_stop(); /* To avoid false positives */
+
 						mgr->cyclic_busy = true;
 						break;
 						
@@ -1944,12 +1924,6 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 
 				if (aux->c->status == S805_DMA_TERMINATED) {
 
-					if (aux->cycle_periods) {
-
-						aux->cycle_periods = 0;
-						list_del(&aux->cycle);
-					}
-					
 					list_del(&aux->elem);
 					s805_dma_desc_free(&aux->vd);
 				}
@@ -1966,8 +1940,6 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 											d->frames);
 			
 		    d->c->status = S805_DMA_IN_PROGRESS;
-			
-			//mgr->pending_irqs ++;
 			
 			thread_mask |= (1 << thread);
 			
@@ -1999,7 +1971,7 @@ static s805_status s805_dma_process_next_desc ( struct s805_chan *c )
 	//dev_warn(c->vc.chan.device->dev, "%s: busy > %s\n", __func__, mgr->busy ? "true" : "false");
 	
 	if (c->status != S805_DMA_PAUSED && c->status != S805_DMA_TERMINATED) {
-
+		
 		c->status = S805_DMA_IN_PROGRESS;
 		
 		s805_dma_schedule_tr(c);
@@ -2010,16 +1982,16 @@ static s805_status s805_dma_process_next_desc ( struct s805_chan *c )
 		   
 	   *  Either the first descriptors in the thread queues are the once we just allocated ...
 	   *  Or there are paused descriptors in the head of the queues.
-				  
+	   
 	   In both cases "s805_dma_fetch_tr" will start the proper transaction, it is, the first belonging
 	   to a non paused channel.
-	  			   
+	   
 	*/
 
 	spin_lock(&mgr->lock);
 	if (!mgr->busy)  
 		s805_dma_fetch_tr(0);
-
+	
 	spin_unlock(&mgr->lock);	
 	
 	return c->status;
@@ -2028,10 +2000,9 @@ static s805_status s805_dma_process_next_desc ( struct s805_chan *c )
 /* Process completed descriptors -- protected by mgr->busy */
 static void s805_dma_process_completed ( unsigned long null )
 {
-	struct s805_desc * d, * temp, * next_cyclic, * root_cyclic;
+	struct s805_desc * d, * temp, * next, * root;
 	uint thread = 0;
 	
-	//s805_dma_hard_reset();
 	if (mgr->cyclic_busy)
 		s805_dma_to_stop();
 	
@@ -2045,38 +2016,32 @@ static void s805_dma_process_completed ( unsigned long null )
 
 				list_del(&d->elem);
 				
-				if (d->cycle_periods) {
-
-					root_cyclic = to_s805_dma_desc(d->vd.tx.parent);
-					next_cyclic = to_s805_dma_desc(d->vd.tx.next);
+				if (d->vd.tx.next) {
 					
-					if (root_cyclic == next_cyclic) {
-						
-						write_lock(&root_cyclic->rwlock);
-						root_cyclic->cb_ready ++;
-						write_unlock(&root_cyclic->rwlock);
+					/* Call cyclic callback. */
+					root = to_s805_dma_desc(d->vd.tx.parent);
+					vchan_cyclic_callback(&root->vd);
+					
+					next = to_s805_dma_desc(d->vd.tx.next);
+					
+					if (d->vd.tx.next == d->vd.tx.parent) 
 						mgr->cyclic_busy = false;
+					
+					if (next->c->status != S805_DMA_PAUSED && mgr->cyclic_busy) {
 						
-						//tasklet_schedule(&mgr->tasklet_cyclic);
-						list_add_tail(&next_cyclic->elem, &mgr->scheduled);
-
-					} else if (next_cyclic->c->status != S805_DMA_PAUSED) {
-						
-						list_add_tail(&next_cyclic->elem, &mgr->in_progress);
+						list_add_tail(&next->elem, &mgr->in_progress);
 						
 						/* Must always return 0 */
 						s805_dma_allocate_tr (thread,
-											  list_first_entry(&next_cyclic->desc_list, s805_dtable, elem),
-											  next_cyclic->frames);
-						
-						//mgr->pending_irqs ++;
+											  list_first_entry(&next->desc_list, s805_dtable, elem),
+											  next->frames);
 						
 						thread ++;
 						
 					} else {
 						
 						spin_lock(&mgr->lock);
-						list_add_tail(&next_cyclic->elem, &mgr->scheduled);
+						list_add_tail(&next->elem, &mgr->scheduled);
 						spin_unlock(&mgr->lock);	
 					}
 					
@@ -2106,8 +2071,6 @@ static void s805_dma_process_completed ( unsigned long null )
 
 				if (d->c->status != S805_DMA_PAUSED) {
 					
-					//mgr->pending_irqs ++;
-					
 					list_move_tail(&d->elem, &mgr->in_progress);
 					
 					d->next = s805_dma_allocate_tr (thread, d->next, d->frames);
@@ -2125,16 +2088,11 @@ static void s805_dma_process_completed ( unsigned long null )
 		} else {
 			
 			dev_dbg(d->c->vc.chan.device->dev, "Terminating transaction.\n");
-			list_del(&d->elem);
 
-			if (d->cycle_periods) {
-				
-				d->cycle_periods = 0;
-				list_del(&d->cycle);
+			if (d->vd.tx.next)
 				mgr->cyclic_busy = false;
-			}
-
-
+			
+			list_del(&d->elem);
 			s805_dma_desc_free(&d->vd);
 		}
 	}
@@ -2142,53 +2100,6 @@ static void s805_dma_process_completed ( unsigned long null )
 	spin_lock(&mgr->lock);
    	s805_dma_fetch_tr(thread);
 	spin_unlock(&mgr->lock);
-}
-
-static void s805_cyclcic_callback ( unsigned long null ) {
-	
-	struct s805_desc * d, * tmp;
-	dma_async_tx_callback cb = NULL;
-	void *cb_data = NULL;
-	uint periods, left;
-	
-	list_for_each_entry_safe (d, tmp, &mgr->cyclics, cycle) {
-
-		if (!d->cycle_periods) 
-			continue;
-		
-		cb = d->vd.tx.callback;
-		cb_data = d->vd.tx.callback_param;
-
-		if (cb){
-
-		    read_lock(&d->rwlock);
-			left = d->cb_ready;
-			read_unlock(&d->rwlock);
-			
-			while (left) {
-
-				periods = 0;
-				
-				while (periods < (d->cycle_periods * d->cycles)) {
-					
-					cb(cb_data);
-					periods ++;
-
-				}
-
-				if (!d->cycle_periods)
-					break;
-				
-				write_lock(&d->rwlock);
-				d->cb_ready --;
-				write_unlock(&d->rwlock);
-
-				read_lock(&d->rwlock);
-				left = d->cb_ready;
-				read_unlock(&d->rwlock);
-			}
-		}
-	}
 }
 
 /* 
@@ -2227,12 +2138,6 @@ static void s805_dma_dismiss_chann ( struct s805_chan * c ) {
 	list_for_each_entry_safe (d, tmp, &mgr->scheduled, elem) {
 		
 		if ( d->c == c )  {
-
-			if (d->cycle_periods) {
-				
-				d->cycle_periods = 0;
-				list_del(&d->cycle);
-			}
 			
 			list_del(&d->elem);
 			s805_dma_desc_free(&d->vd);
@@ -2243,7 +2148,7 @@ static void s805_dma_dismiss_chann ( struct s805_chan * c ) {
 static s805_status s805_dma_chan_wait_for_pending (struct s805_chan * c) {
 
 	unsigned long now;
-	unsigned int alive = 30;
+	unsigned int alive = (S805_DMA_CYCLIC_TO / 10) * 2; /* about 1 sec. */
 	
 	while (c->pending > 0 && alive) {
 		
@@ -2298,7 +2203,6 @@ static int s805_dma_control (struct dma_chan *chan,
 	case DMA_TERMINATE_ALL:
 		{
 			c->status = S805_DMA_TERMINATED;
-			s805_dma_to_stop();
 			
 			spin_lock(&c->vc.lock);
 			
@@ -2402,16 +2306,18 @@ static int s805_dma_control (struct dma_chan *chan,
 
 static u32 get_residue (struct s805_desc * d) {
 
-	struct dma_async_tx_descriptor * cursor = &d->vd.tx;
+	struct dma_async_tx_descriptor * cursor, * me = &d->vd.tx;
 	struct s805_desc * aux;
 	s805_dtable *desc;
 	u32 residue = 0;
 
 	/* Cyclic transfer*/
-	if (cursor->next) {
+	if (me->next) {
 
+		cursor = me->next;
+		
 		/* Will count the prediods we are lacking till the end of the buffer. */
-		while (cursor != cursor->parent) {
+		while (cursor != me) {
 			
 			aux = to_s805_dma_desc(cursor);
 			
@@ -2419,14 +2325,11 @@ static u32 get_residue (struct s805_desc * d) {
 				residue += desc->table->count;
 			
 			cursor = cursor->next;
-		}
+		}	
+	} 
 		
-	} else {
-		
-		list_for_each_entry (desc, &d->desc_list, elem)
-			residue += desc->table->count;
-		
-	}
+	list_for_each_entry (desc, &d->desc_list, elem)
+		residue += desc->table->count;
 	
 	return residue;
 }
@@ -2574,13 +2477,8 @@ static int s805_dmamgr_probe(struct platform_device *pdev)
 	INIT_LIST_HEAD(&mgr->scheduled);
 	INIT_LIST_HEAD(&mgr->in_progress);
 	INIT_LIST_HEAD(&mgr->completed);
-
-	INIT_LIST_HEAD(&mgr->cyclics);
-
-	rwlock_init(&mgr->rwlock);
 	
 	mgr->tasklet_completed = (struct tasklet_struct) { NULL, 0, ATOMIC_INIT(0), s805_dma_process_completed, 0 };
-	mgr->tasklet_cyclic = (struct tasklet_struct) { NULL, 0, ATOMIC_INIT(0), s805_cyclcic_callback, 0 };
 	
 	dev_info(&pdev->dev, "DMA legacy API manager at 0x%p\n", mgr);
 	

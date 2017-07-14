@@ -127,13 +127,7 @@ struct s805_desc {
 
 	/* For transactions with more than S805_DMA_MAX_DESC data chunks. */
 	s805_dtable * next;
-
-	/* For cyclic transactions. */
-	uint cycle_periods;
-	uint cycles;
-    uint cb_ready;
-	rwlock_t rwlock;
-	struct list_head cycle;
+	
 };
 
 typedef struct s805_chan {

@@ -54,20 +54,6 @@ config S805_DMAC
 
 	  If usure say N.
 
-if S805_DMAC
-   config S805_DMAC_MIN_CYCLE_SIZE
-   		  int "Minimal size (Bytes) of a cycle."
-		  range 1 102400
-		  default 25600
-		  help
-		  This will set the minimum cycle size for a cyclic transfer.
-		  The actual cycle will be sized as demanded by the user, however
-		  if the cycle given is shorter than the size stated here "n" cycles
-		  will be allocated in the same batch till the total size of the cycles
-		  summated is at least S805_DMAC_MIN_CYCLE_SIZE. Implemented to reduce
-		  interrupts, values above 25600 (25K) should be safe enough.
-endif
-
 config INTEL_MID_DMAC
 	tristate "Intel MID DMA support for Peripheral DMA controllers"
 	depends on PCI && X86
