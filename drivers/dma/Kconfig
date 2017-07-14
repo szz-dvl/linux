@@ -54,6 +54,43 @@ config S805_DMAC
 
 	  If usure say N.
 
+config S805_DMAC_CYCLIC_TO
+	   bool "Time out for cyclic transfers."
+	   depends on S805_DMAC
+	   default n
+	   help
+			Cyclic transfers may generate a large amount of interrupts, and at
+			the same time, may be heavy for the hardware, leaving it in a perpetual
+			stalled state. This option will enable a timeout for this situation to
+			be treated properly in case of failure. As a pro we can guarantee that
+			hardware hangs or crashes will be properly handled, in the other hand,
+			if the time out value provided is not big enough big transactions may be
+			timed out while the transaction is rightfully unfinished.
+
+			After some testing, a value of 500 ms have been proved to support transfers
+			up to ~145MB of period lenght. When setting this value NOT cyclic transactions
+			must be taken into account too, since transactions will be parallelized as much
+			as possible, it is, if a cyclic transfer is active while other jobs
+			(not cyclic ones for an instance) are scheduled, time out will apply for
+			this transactions too, so the size limit will affect any transaction active
+			while a cyclic transaction is in progress. To overcome this situation
+			if a timeout is desired while big non cyclic transactions are expected
+			the channel holding the cyclic transaction may be paused while the other
+			transactions finish, or the big transactions may be splitted into several
+			small ones.
+
+			If selected, TIMER_A will be used to generate the time out interrupts.
+
+			Say Y if you are experiencing hardware crahes when cyclic transactions
+			are configured, othrewise say N.
+			
+config S805_DMAC_CYCLIC_TO_VAL
+	   int "Provide timeout value (in milliseconds) for cyclic transfers."
+	   depends on S805_DMAC_CYCLIC_TO 
+	   range 10 5000
+	   default 500
+	   		
+
 config INTEL_MID_DMAC
 	tristate "Intel MID DMA support for Peripheral DMA controllers"
 	depends on PCI && X86

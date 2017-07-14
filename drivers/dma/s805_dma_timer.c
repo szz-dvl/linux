@@ -34,6 +34,27 @@ static inline void s805_dma_hard_reset ( void ) {
 	
 }
 
+static void s805_dma_reschedule_broken ( struct s805_dmadev *m ) {
+
+	struct s805_desc * d, * temp;
+	LIST_HEAD(head);
+
+	list_splice_tail_init(&m->completed, &head);
+	list_splice_tail_init(&m->in_progress, &head);
+
+	list_for_each_entry_safe(d, temp, &head, elem) {
+		
+		if (d->vd.tx.next) 
+			list_move_tail(&d->elem, &m->completed); /* Cyclic transfer */
+		else {
+			
+			spin_lock(&m->lock);
+			list_move(&d->elem, &m->scheduled); /* Re-schedule transactions that where in the batch in the moment of the time-out, giving them preference (in the head of the queue) */
+			spin_unlock(&m->lock);
+		}
+	}
+
+}
 static irqreturn_t s805_dma_to_callback (int irq, void *data)
 {
 	struct s805_dmadev *m = data;
@@ -44,8 +65,8 @@ static irqreturn_t s805_dma_to_callback (int irq, void *data)
 		
 		s805_dma_hard_reset();
 
-		list_splice_tail_init(&m->in_progress, &m->completed);
-		tasklet_schedule(&m->tasklet_completed);
+		s805_dma_reschedule_broken(m);
+		tasklet_hi_schedule(&m->tasklet_completed);
 		
 	} else
 	    dev_info(m->ddev.dev,"Timeout interrupt: Bye Bye.\n");

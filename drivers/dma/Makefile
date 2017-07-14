@@ -38,4 +38,11 @@ obj-$(CONFIG_DMA_SA11X0) += sa11x0-dma.o
 obj-$(CONFIG_MMP_TDMA) += mmp_tdma.o
 obj-$(CONFIG_DMA_OMAP) += omap-dma.o
 obj-$(CONFIG_MMP_PDMA) += mmp_pdma.o
-obj-$(CONFIG_S805_DMAC) += s805_dmaengine.o s805_dma_timer.o 
+
+s805_dmac-y := s805_dmaengine.o
+s805_dmac-$(CONFIG_S805_DMAC_CYCLIC_TO) += s805_dma_timer.o
+
+obj-$(CONFIG_S805_DMAC) += s805_dmac.o
+
+
+

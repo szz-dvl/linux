@@ -18,7 +18,12 @@
 
 #define S805_DMA_IRQ                     INT_NDMA
 #define S805_DMA_ALIGN_SIZE              sizeof(unsigned long long)
-#define S805_DMA_CYCLIC_TO               500  /* ms */
+
+#ifdef CONFIG_S805_DMAC_CYCLIC_TO
+#define S805_DMA_CYCLIC_TO               CONFIG_S805_DMAC_CYCLIC_TO_VAL  /* ms */
+#else
+#define S805_DMA_CYCLIC_TO               150  /* Used in terminate channel and channel release, for busy waiting a channel to free its pending transactions. */
+#endif
 
 /* Registers & Bitmaps for the s805 DMAC */
 
@@ -69,7 +74,12 @@ static inline struct s805_desc *to_s805_dma_desc(struct dma_async_tx_descriptor 
 	return container_of(t, struct s805_desc, vd.tx);
 }
 
+#ifdef CONFIG_S805_DMAC_CYCLIC_TO
 struct s805_dmadev *mgr;
+#else
+static struct s805_dmadev *mgr;
+#endif
+
 static unsigned int dma_channels = 0;
 
 static const struct of_device_id s805_dma_of_match[] = 
@@ -1901,8 +1911,9 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 
 					if (!mgr->cyclic_busy) {
 						
+#ifdef CONFIG_S805_DMAC_CYCLIC_TO
 						s805_dma_to_stop(); /* To avoid false positives */
-
+#endif
 						mgr->cyclic_busy = true;
 						break;
 						
@@ -1939,16 +1950,20 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 										    d->next ? d->next : list_first_entry(&d->desc_list, s805_dtable, elem),
 											d->frames);
 			
-		    d->c->status = S805_DMA_IN_PROGRESS;
+			/* Coming from dmaengine_resume */
+			if (d->c->status == S805_DMA_SUCCESS)
+				d->c->status = S805_DMA_IN_PROGRESS;
 			
 			thread_mask |= (1 << thread);
 			
 		    mgr->busy = true;
 		} 
 	}
-
+	
+#ifdef CONFIG_S805_DMAC_CYCLIC_TO
 	if (mgr->cyclic_busy)
 		s805_dma_to_start(S805_DMA_CYCLIC_TO);
+#endif
 	
 	for (thread = 0; thread < S805_DMA_MAX_THREAD; thread ++) {
 
@@ -2002,9 +2017,11 @@ static void s805_dma_process_completed ( unsigned long null )
 {
 	struct s805_desc * d, * temp, * next, * root;
 	uint thread = 0;
-	
+
+#ifdef CONFIG_S805_DMAC_CYCLIC_TO
 	if (mgr->cyclic_busy)
 		s805_dma_to_stop();
+#endif
 	
 	list_for_each_entry_safe (d, temp, &mgr->completed, elem) {
 		
@@ -2039,6 +2056,8 @@ static void s805_dma_process_completed ( unsigned long null )
 						thread ++;
 						
 					} else {
+
+						mgr->cyclic_busy = false;
 						
 						spin_lock(&mgr->lock);
 						list_add_tail(&next->elem, &mgr->scheduled);
@@ -2148,7 +2167,7 @@ static void s805_dma_dismiss_chann ( struct s805_chan * c ) {
 static s805_status s805_dma_chan_wait_for_pending (struct s805_chan * c) {
 
 	unsigned long now;
-	unsigned int alive = (S805_DMA_CYCLIC_TO / 10) * 2; /* about 1 sec. */
+	unsigned int alive = (S805_DMA_CYCLIC_TO / 10) * 2; /* Two cyclic timeouts or about 300 ms if time out is not set. */
 	
 	while (c->pending > 0 && alive) {
 		
@@ -2167,13 +2186,16 @@ static s805_status s805_dma_chan_wait_for_pending (struct s805_chan * c) {
 }
 
 /* Dismiss a previously scheduled descriptor -- protected by mgr->lock */
-static s805_status s805_dma_chan_terminate ( struct s805_chan * c ) {
+static s805_status s805_dma_chan_terminate ( struct s805_chan * c, s805_status init ) {
+	
+	s805_status status = S805_DMA_ERROR;
 
-	s805_status status = s805_dma_chan_wait_for_pending(c);
+	if (init != S805_DMA_PAUSED)
+		status = s805_dma_chan_wait_for_pending(c);
 	
 	/* Dismiss all scheduled operations */
 	if (status == S805_DMA_ERROR) {
-
+		
 		spin_lock(&mgr->lock);
 		s805_dma_dismiss_chann(c);
 		spin_unlock(&mgr->lock);
@@ -2197,6 +2219,7 @@ static int s805_dma_control (struct dma_chan *chan,
 {
 	
     struct s805_chan * c = to_s805_dma_chan(chan);
+	s805_status init = c->status;
 	LIST_HEAD(head);
 	
 	switch (cmd) {
@@ -2210,7 +2233,7 @@ static int s805_dma_control (struct dma_chan *chan,
 			
 			spin_unlock(&c->vc.lock);
 
-			c->status = s805_dma_chan_terminate (c);
+			c->status = s805_dma_chan_terminate (c, init);
 
 			/* Recreate the pool */
 			dma_pool_destroy(c->pool);
@@ -2226,9 +2249,6 @@ static int s805_dma_control (struct dma_chan *chan,
 				c->status = S805_DMA_ERROR;
 				
 			}
-
-			//mgr->busy = false; /* !! */
-			
 		}
 		break;;
 		
@@ -2239,12 +2259,9 @@ static int s805_dma_control (struct dma_chan *chan,
 			   If there is a transaction in progress we will let the current batch of desciptors finish, 
 			   a new batch won't be scheduled however. 
 			*/
-
-			//spin_lock(&c->vc.lock);
 			
 			c->status = S805_DMA_PAUSED;
 
-			//spin_unlock(&c->vc.lock);
 		}
 		break;;
 		
@@ -2402,12 +2419,13 @@ static void s805_dma_issue_pending(struct dma_chan *chan)
 static void s805_dma_free_chan_resources(struct dma_chan *chan)
 {
 	struct s805_chan *c = to_s805_dma_chan(chan);
-
+	s805_status init = c->status;
+	
 	c->status = S805_DMA_TERMINATED;
 	
 	vchan_free_chan_resources(&c->vc);
 	
-	s805_dma_chan_terminate (c);
+	s805_dma_chan_terminate (c, init);
 	
 	dma_pool_destroy(c->pool);
 }
@@ -2483,9 +2501,11 @@ static int s805_dmamgr_probe(struct platform_device *pdev)
 	dev_info(&pdev->dev, "DMA legacy API manager at 0x%p\n", mgr);
 	
 	mgr->irq_number = S805_DMA_IRQ;
-
+	
+#ifdef CONFIG_S805_DMAC_CYCLIC_TO
 	if (s805_dma_to_init())
 		return 0;
+#endif
 	
 	return request_irq(mgr->irq_number, s805_dma_callback, 0, "s805_dmaengine_irq", mgr);
 }
@@ -2505,7 +2525,10 @@ static void s805_dma_free(struct s805_dmadev *m)
 	}
 
 	free_irq(m->irq_number, m);
+	
+#ifdef CONFIG_S805_DMAC_CYCLIC_TO
 	s805_dma_to_shutdown();
+#endif
 	
 }
 
