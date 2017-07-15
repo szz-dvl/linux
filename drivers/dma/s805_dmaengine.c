@@ -289,10 +289,13 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 	src_info.bytes = 0;
 	dst_info.bytes = 0;
 	
-	src_addr = src_info.cursor ? sg_dma_address(src_info.cursor) : 0;
+	desc_tbl->table->src = src_addr = src_info.cursor ? sg_dma_address(src_info.cursor) : 0;
 	dst_addr = dst_info.cursor ? sg_dma_address(dst_info.cursor) : 0;
+
+	if (!desc_tbl->table->dst)
+		desc_tbl->table->dst = dst_addr;
 	
-	/* "Fwd logic" not optimal, first approach, must do. */
+	/* "Fwd logic" ¿not optimal?, first approach, must do. */
 	while (src_info.cursor || dst_info.cursor) {
 		
 		src_len = get_sg_remain(&src_info);
@@ -338,12 +341,11 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 				
 			if (!desc_tbl->table->src_burst) {
 
-				/* This check will ensure that the next block will fit in the src_burst size we will allocate right after this lines. */
 				if (next_burst == desc_tbl->table->count &&
 					desc_tbl->table->count <= S805_DMA_MAX_BURST) {
 					
 				   
-					if (icg >= 0 && icg <= S805_DMA_MAX_SKIP && icg == next_icg) {
+					if (icg >= 0 && icg <= S805_DMA_MAX_SKIP && (icg == next_icg || !src_info.next)) {
 								
 						desc_tbl->table->src_burst = desc_tbl->table->count; 
 						desc_tbl->table->src_skip = icg;
@@ -357,10 +359,9 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 			
 			src_addr = src_info.cursor ? sg_dma_address(src_info.cursor) : 0;
 			
-		} else
-			new_block = false; /* Fake, just to make sure next block will be evaluated. */
+		} 
 		
-		if (sg_ent_complete(&dst_info) && !new_block) {
+		if ( sg_ent_complete(&dst_info) && (!sg_ent_complete(&src_info) || (sg_ent_complete(&src_info) && !new_block)) ) {
 
 			icg = get_sg_icg(&dst_info);
 			next_burst = dst_info.next ? sg_dma_len(dst_info.next) : -1;
@@ -368,12 +369,11 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 			next_icg = get_sg_icg(&dst_info);
 			
 			if (!desc_tbl->table->dst_burst) {
-
-				/* This check will ensure that the next block will fit in the dst_burst size we will allocate right after this lines. */
+				
 				if (next_burst == desc_tbl->table->count &&
 					desc_tbl->table->count <= S805_DMA_MAX_BURST) {
 				
-					if (icg >= 0 && icg <= S805_DMA_MAX_SKIP && icg == next_icg) {
+					if (icg >= 0 && icg <= S805_DMA_MAX_SKIP && (icg == next_icg || !dst_info.next)) {
 						
 						desc_tbl->table->dst_burst = desc_tbl->table->count;
 						desc_tbl->table->dst_skip = icg;
@@ -390,8 +390,16 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 				new_block = true;
 
 			dst_addr = dst_info.cursor ? sg_dma_address(dst_info.cursor) : 0;
-		}
 
+		} else if (sg_ent_complete(&dst_info)) {
+
+			/* Both entries complete, src demands a new block. */
+			
+			fwd_sg(&dst_info); 
+			dst_addr = dst_info.cursor ? sg_dma_address(dst_info.cursor) : 0;
+			
+		}
+		
 		new_block = new_block && (dst_info.cursor || src_info.cursor);
 		
 		if (new_block) {
@@ -402,10 +410,10 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 				goto error_allocation;
 			
 			desc_tbl->table->src = src_addr + (dma_addr_t)src_info.bytes;
-
+			
 			if (!desc_tbl->table->dst)
 				desc_tbl->table->dst = dst_addr + (dma_addr_t)dst_info.bytes;
-
+			
 		} else if (!dst_info.cursor && !src_info.cursor) {
 
 			list_add_tail(&desc_tbl->elem, &d->desc_list);
@@ -427,13 +435,11 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 		dma_pool_free(d->c->pool, desc_tbl->table, desc_tbl->paddr);
 		list_del(&desc_tbl->elem);
 		kfree(desc_tbl);
-		
 	}
 	
 	kfree(d);
 	
 	return NULL;
-	
 }
 
 /* END of Public functions, for crypto modules */
@@ -442,11 +448,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 /* 
    Bypass function for dma_prep_slave_sg (dmaengine interface) 
    
-   To - Do:
-   
-   * Add support for crypto inline types;
-   
-   */
+*/
 
 static struct dma_async_tx_descriptor * 
 s805_dma_prep_slave_sg( struct dma_chan *chan,
@@ -674,11 +676,10 @@ s805_dma_prep_slave_sg( struct dma_chan *chan,
 			
 			if (*my_burst == 0) {
 
-				/* This check will ensure that the next block will fit in the src_burst size we will allocate right after this lines. */
 				if (next_burst == desc_tbl->table->count &&
 					desc_tbl->table->count <= S805_DMA_MAX_BURST) {
 					
-					if (icg >= 0 && icg <= S805_DMA_MAX_SKIP && icg == next_icg) {
+					if (icg >= 0 && icg <= S805_DMA_MAX_SKIP && (icg == next_icg || !info.next)) {
 						
 						*my_burst = desc_tbl->table->count; 
 						*my_skip = icg;
