@@ -71,7 +71,7 @@ static s805_dtable * def_init_aes_tdesc (unsigned int frames, s805_aes_key_type 
 	
 	if (!desc_tbl) 
 	    return NULL;
-	
+
 	desc_tbl->table = dma_pool_alloc(aes_mgr->chan->pool, GFP_NOWAIT | __GFP_ZERO, &desc_tbl->paddr); /* __GFP_ZERO: Not Working. */
 	
 	if (!desc_tbl->table) {

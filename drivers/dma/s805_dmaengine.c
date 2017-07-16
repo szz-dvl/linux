@@ -103,7 +103,7 @@ static void add_zeroed_tdesc (struct s805_desc * d)
 	if (!desc_tbl) 
 	    return;
 	
-	desc_tbl->table = dma_pool_alloc(d->c->pool, GFP_NOWAIT | __GFP_ZERO, &desc_tbl->paddr); /* __GFP_ZERO: Not Working. */
+	desc_tbl->table = dma_pool_alloc(d->c->pool, GFP_NOWAIT, &desc_tbl->paddr); /* __GFP_ZERO: Not Working. */
 	
 	if (!desc_tbl->table) {
 		
@@ -125,8 +125,8 @@ static s805_dtable * def_init_new_tdesc (struct s805_chan * c, unsigned int fram
 	
 	if (!desc_tbl) 
 	    return NULL;
-	
-	desc_tbl->table = dma_pool_alloc(c->pool, GFP_NOWAIT | __GFP_ZERO, &desc_tbl->paddr); /* __GFP_ZERO: Not Working. */
+
+	desc_tbl->table = dma_pool_alloc(c->pool, GFP_NOWAIT, &desc_tbl->paddr); /* __GFP_ZERO: Not Working. */
 	
 	if (!desc_tbl->table) {
 		
@@ -273,7 +273,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 	unsigned int src_len, dst_len;
 	dma_addr_t src_addr, dst_addr;
 	int min_size, act_size, icg, next_icg, next_burst;
-	bool new_block;
+	bool new_block, src_completed;
 	
 	d = init_nfo->d = to_s805_dma_desc(tx_desc);
 	
@@ -295,12 +295,12 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 	if (!desc_tbl->table->dst)
 		desc_tbl->table->dst = dst_addr;
 	
-	/* "Fwd logic" ¿not optimal?, first approach, must do. */
+	/* "Fwd logic" ¿not optimal?, must do. */
 	while (src_info.cursor || dst_info.cursor) {
 		
 		src_len = get_sg_remain(&src_info);
 		dst_len = get_sg_remain(&dst_info);
-	   
+		
 	    min_size = min(dst_len, src_len);
 		
 	    while (min_size > 0) {
@@ -315,7 +315,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 					goto error_allocation;
 				
 				desc_tbl->table->src = src_addr + (dma_addr_t) src_info.bytes;
-
+				
 				if (!desc_tbl->table->dst)
 					desc_tbl->table->dst = dst_addr + (dma_addr_t) dst_info.bytes;		
 			}
@@ -327,20 +327,22 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 			
 		    min_size -= act_size;
 		}
-
+		
 		/* Either src entry or dst entry or both are complete here.  */
 		
 		new_block = true;
+		src_completed = false;
 		
 		if (sg_ent_complete(&src_info)) {
 
+			src_completed = true;
 			icg = get_sg_icg(&src_info);
 			next_burst = src_info.next ? sg_dma_len(src_info.next) : -1;
 			fwd_sg(&src_info);
 			next_icg = get_sg_icg(&src_info);
-				
+			
 			if (!desc_tbl->table->src_burst) {
-
+				
 				if (next_burst == desc_tbl->table->count &&
 					desc_tbl->table->count <= S805_DMA_MAX_BURST) {
 					
@@ -349,8 +351,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 								
 						desc_tbl->table->src_burst = desc_tbl->table->count; 
 						desc_tbl->table->src_skip = icg;
-						new_block = false;	
-						
+						new_block = false;		
 					}
 				}
 				
@@ -358,10 +359,9 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 				new_block = false;
 			
 			src_addr = src_info.cursor ? sg_dma_address(src_info.cursor) : 0;
-			
-		} 
+		}
 		
-		if ( sg_ent_complete(&dst_info) && (!sg_ent_complete(&src_info) || (sg_ent_complete(&src_info) && !new_block)) ) {
+		if ( sg_ent_complete(&dst_info) && (!src_completed || (src_completed && !new_block)) ) {
 
 			icg = get_sg_icg(&dst_info);
 			next_burst = dst_info.next ? sg_dma_len(dst_info.next) : -1;
