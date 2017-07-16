@@ -147,7 +147,7 @@ static int s805_aes_iv_gen (struct skcipher_givcrypt_request * skreq) {
 	if (!aes_mgr->busy) {
 		spin_unlock(&aes_mgr->lock);
 
-		get_random_bytes (skreq->giv, AES_BLOCK_SIZE);
+		get_random_bytes_arch (skreq->giv, AES_BLOCK_SIZE);
 
 		aux = (u32 *)skreq->giv;
 

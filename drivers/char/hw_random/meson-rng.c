@@ -54,7 +54,7 @@ static int meson_read(struct hwrng *rng, void *buf,
 	struct meson_rng *meson_rng = container_of(rng,
 	                                  struct meson_rng, rng);
 	u32 *data = buf;
-
+	
 	pm_runtime_get_sync(meson_rng->dev);
 
 	// this will cause additional disturbances

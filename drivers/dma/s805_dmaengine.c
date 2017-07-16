@@ -201,7 +201,7 @@ static int get_sg_icg (struct sg_info * info) {
 	if (info->next)
 		return sg_dma_address(info->next) - (sg_dma_address(info->cursor) + sg_dma_len(info->cursor));
 	else
-		return -1;
+		return 0;//-1;
 }
 
 static uint get_sg_remain (struct sg_info * info) {
@@ -272,9 +272,10 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 	s805_dtable * temp, * desc_tbl;
 	unsigned int src_len, dst_len;
 	dma_addr_t src_addr, dst_addr;
-	int min_size, act_size, icg, next_icg, next_burst;
+	int min_size, next_burst;
 	bool new_block, src_completed;
-	
+	uint act_size, icg, burst;
+		
 	d = init_nfo->d = to_s805_dma_desc(tx_desc);
 	
 	desc_tbl = sg_init_desc (NULL, init_nfo);
@@ -308,14 +309,16 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 			act_size = min_size <= S805_MAX_TR_SIZE ? min_size : S805_MAX_TR_SIZE;
 			
 			if ((desc_tbl->table->count + act_size) > S805_MAX_TR_SIZE) {
-
+				
+				/* Be careful!! may break multiplicity of blocks, to be tested. (MAX values protecting us?) */
 				desc_tbl = sg_init_desc (desc_tbl, init_nfo);
-					
+				
 				if (!desc_tbl)
 					goto error_allocation;
 				
 				desc_tbl->table->src = src_addr + (dma_addr_t) src_info.bytes;
 				
+				/* DivX will have RK_FIFO address already set. */
 				if (!desc_tbl->table->dst)
 					desc_tbl->table->dst = dst_addr + (dma_addr_t) dst_info.bytes;		
 			}
@@ -331,74 +334,78 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 		/* Either src entry or dst entry or both are complete here.  */
 		
 		new_block = true;
-		src_completed = false;
+	    src_completed = false;
 		
 		if (sg_ent_complete(&src_info)) {
-
+			
 			src_completed = true;
 			icg = get_sg_icg(&src_info);
+			burst = src_info.bytes;
 			next_burst = src_info.next ? sg_dma_len(src_info.next) : -1;
 			fwd_sg(&src_info);
-			next_icg = get_sg_icg(&src_info);
 			
+			/* ICG will be cleared if no burst present.*/
 			if (!desc_tbl->table->src_burst) {
 				
-				if (next_burst == desc_tbl->table->count &&
-					desc_tbl->table->count <= S805_DMA_MAX_BURST) {
+				if (burst <= S805_DMA_MAX_BURST && burst == desc_tbl->table->count) {
 					
-				   
-					if (icg >= 0 && icg <= S805_DMA_MAX_SKIP && (icg == next_icg || !src_info.next)) {
-								
-						desc_tbl->table->src_burst = desc_tbl->table->count; 
+					if (icg <= S805_DMA_MAX_SKIP) {
+						
+						desc_tbl->table->src_burst = burst; 
 						desc_tbl->table->src_skip = icg;
-						new_block = false;		
-					}
-				}
+						new_block = false;
+						
+					} 
+					
+				} else if (desc_tbl->table->dst_burst == 0 && icg == 0) /* Contiguous in memory, 1D case. */
+					new_block = false;
 				
-			} else if (desc_tbl->table->src_burst == next_burst && (desc_tbl->table->src_skip == next_icg || !src_info.next)) 
+			} else if ((desc_tbl->table->src_burst == next_burst || next_burst < 0) && desc_tbl->table->src_skip == icg) 
 				new_block = false;
 			
 			src_addr = src_info.cursor ? sg_dma_address(src_info.cursor) : 0;
 		}
 		
 		if ( sg_ent_complete(&dst_info) && (!src_completed || (src_completed && !new_block)) ) {
-
+			
 			icg = get_sg_icg(&dst_info);
+			burst = dst_info.bytes;
 			next_burst = dst_info.next ? sg_dma_len(dst_info.next) : -1;
 			fwd_sg(&dst_info);
-			next_icg = get_sg_icg(&dst_info);
 			
 			if (!desc_tbl->table->dst_burst) {
 				
-				if (next_burst == desc_tbl->table->count &&
-					desc_tbl->table->count <= S805_DMA_MAX_BURST) {
-				
-					if (icg >= 0 && icg <= S805_DMA_MAX_SKIP && (icg == next_icg || !dst_info.next)) {
+				if (burst <= S805_DMA_MAX_BURST && burst == desc_tbl->table->count) {
+					
+					if (icg <= S805_DMA_MAX_SKIP) {
 						
-						desc_tbl->table->dst_burst = desc_tbl->table->count;
+						desc_tbl->table->dst_burst = burst;
 						desc_tbl->table->dst_skip = icg;
 						new_block = false;
 						
-					} else
+					} else 
 						new_block = true;
-				} else
+				    
+				} else if (desc_tbl->table->src_burst == 0 && icg == 0) /* Contiguous in memory, 1D case. */
+					new_block = false;
+				else
 					new_block = true;
 				
-			} else if (desc_tbl->table->dst_burst == next_burst && (desc_tbl->table->dst_skip == next_icg || !dst_info.next)) 
+			} else if ((desc_tbl->table->dst_burst == next_burst || next_burst < 0) && desc_tbl->table->dst_skip == icg) 
 				new_block = false;
 			else
 				new_block = true;
-
+			
 			dst_addr = dst_info.cursor ? sg_dma_address(dst_info.cursor) : 0;
-
+			
 		} else if (sg_ent_complete(&dst_info)) {
-
+			
 			/* Both entries complete, src demands a new block. */
 			
 			fwd_sg(&dst_info); 
 			dst_addr = dst_info.cursor ? sg_dma_address(dst_info.cursor) : 0;
 			
-		}
+	    }
 		
 		new_block = new_block && (dst_info.cursor || src_info.cursor);
 		
@@ -410,22 +417,23 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 				goto error_allocation;
 			
 			desc_tbl->table->src = src_addr + (dma_addr_t)src_info.bytes;
-			
+
+			/* DivX will have RK_FIFO address already set. */
 			if (!desc_tbl->table->dst)
 				desc_tbl->table->dst = dst_addr + (dma_addr_t)dst_info.bytes;
 			
 		} else if (!dst_info.cursor && !src_info.cursor) {
-
+			
 			list_add_tail(&desc_tbl->elem, &d->desc_list);
 		    d->frames ++;	
 		}
 	}
-
+	
 	if (last) 
 		s805_close_desc(tx_desc);
 	
 	return tx_desc;
-
+	
  error_allocation:
 	
 	dev_err(d->c->vc.chan.device->dev, "%s: Error allocating descriptors.", __func__);
@@ -464,8 +472,8 @@ s805_dma_prep_slave_sg( struct dma_chan *chan,
 	dma_addr_t dev_addr;
 	struct sg_info info;
 	s805_dtable * desc_tbl, * temp;
-	uint size, act_size;
-	int icg, next_icg, next_burst;
+	uint size, act_size, icg, next_icg;
+	int next_burst;
 	dma_addr_t addr;
 	u16 * my_burst, * my_skip;
 	bool new_block;
@@ -1846,7 +1854,7 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 				/* Last descriptors will be zeroed */
 				if (!list_is_last(&desc->elem, &aux->desc_list)) {
 					
-					dev_dbg(d->c->vc.chan.device->dev, "0x%p %03u (0x%08X): ctrl = 0x%08X, src = 0x%08X, dst = 0x%08X, byte_cnt = %u, src_burst = %u, src_skip = %u, dst_burst = %u, dst_skip = %u\n",
+					dev_dbg(d->c->vc.chan.device->dev, "0x%p %03u (0x%08X): ctrl = 0x%08X, src = 0x%08X, dst = 0x%08X, byte_cnt = %08u, src_burst = %05u, src_skip = %05u, dst_burst = %05u, dst_skip = %05u, crypto = 0x%08X\n",
 							&aux->vd.tx,
 							i,
 							desc->paddr,
@@ -1857,7 +1865,8 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 							desc->table->src_burst,
 							desc->table->src_skip,
 							desc->table->dst_burst,
-							desc->table->dst_skip);
+							desc->table->dst_skip,
+							desc->table->crypto);
 					i++;
 				}	
 			}
