@@ -1729,23 +1729,26 @@ static void s805_dma_desc_free(struct virt_dma_desc *vd)
 			kfree(aux);
 		}
 	}
-
-	/* This will free the current descriptor for a cyclic chain. */
+		
 	list_for_each_entry_safe (desc_tbl, temp, &d->desc_list, elem) {
 		
 		dma_pool_free(d->c->pool, desc_tbl->table, desc_tbl->paddr);
 		list_del(&desc_tbl->elem);
 		kfree(desc_tbl);
+		
 	}
+	
 
 	if (d->memset)
-		dma_free_coherent(d->c->vc.chan.device->dev, sizeof(long long), d->memset->value, d->memset->paddr);
+		dma_free_coherent(c->vc.chan.device->dev, sizeof(long long), d->memset->value, d->memset->paddr);
 	
-	dev_dbg(d->c->vc.chan.device->dev, "Descriptor 0x%p: Freed.", me);
+	dev_dbg(c->vc.chan.device->dev, "Descriptor 0x%p: Freed.", me);
     
 	kfree(d);
-	
+
+	spin_lock(&c->vc.lock);
 	c->pending --;
+	spin_unlock(&c->vc.lock);
 	
 	if (cyclic)
 		tasklet_enable(&c->vc.task);
@@ -1837,8 +1840,8 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 	
 	list_for_each_entry_safe (vd, tmp, &c->vc.desc_issued, node) {
 
+		list_del(&vd->node);
 		d = to_s805_dma_desc(&vd->tx);
-		d->c->pending ++;
 		
 #ifdef DEBUG
 
@@ -1886,16 +1889,27 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 			   This descriptor comes from device_prep_interrupt, and nobody has added info into it, so mark the cookie as completed to trigger 
 			   the associated callback, and try to process any pending descriptors.
 			*/
+
+			spin_lock(&d->c->vc.lock);
+			
+			c->status = S805_DMA_SUCCESS;
 			
 			vchan_cookie_complete(&d->vd);
+			
+			spin_unlock(&d->c->vc.lock);
+			
 			continue;
 		}
 		
 		spin_lock(&mgr->lock);
 		list_add_tail(&d->elem, &mgr->scheduled);
 		spin_unlock(&mgr->lock);
-		
-		list_del(&vd->node);	
+
+		spin_lock(&d->c->vc.lock);
+		d->c->pending ++;
+		spin_unlock(&d->c->vc.lock);
+
+		c->status = S805_DMA_IN_PROGRESS;	
 	}
 }
 
@@ -1995,12 +2009,9 @@ static s805_status s805_dma_process_next_desc ( struct s805_chan *c )
 
 	//dev_warn(c->vc.chan.device->dev, "%s: busy > %s\n", __func__, mgr->busy ? "true" : "false");
 	
-	if (c->status != S805_DMA_PAUSED && c->status != S805_DMA_TERMINATED) {
-		
-		c->status = S805_DMA_IN_PROGRESS;
-		
+	if (c->status != S805_DMA_PAUSED && c->status != S805_DMA_TERMINATED)	
 		s805_dma_schedule_tr(c);
-	}
+	
 	
 	/* 
 	   We may face two different situations here: 
@@ -2283,9 +2294,10 @@ static int s805_dma_control (struct dma_chan *chan,
 				c->status = S805_DMA_SUCCESS;
 				
 				if (vchan_issue_pending(&c->vc)) {
-
-					s805_dma_process_next_desc(c);
 					spin_unlock(&c->vc.lock);
+					
+					s805_dma_process_next_desc(c);
+					
 					
 				} else {
 					
@@ -2413,11 +2425,13 @@ static void s805_dma_issue_pending(struct dma_chan *chan)
 	struct s805_chan *c = to_s805_dma_chan(chan);
 	
 	spin_lock(&c->vc.lock);
-
-	if (vchan_issue_pending(&c->vc)) 
+	if (vchan_issue_pending(&c->vc))  {
+		spin_unlock(&c->vc.lock);
+		
 		s805_dma_process_next_desc(c);
-	
-	spin_unlock(&c->vc.lock);
+
+	} else
+		spin_unlock(&c->vc.lock);
 }
 
 /*
