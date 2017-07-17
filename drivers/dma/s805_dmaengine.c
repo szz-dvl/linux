@@ -56,7 +56,7 @@
 
 struct memset_info {
 
-	long long * value;
+	unsigned long long * value;
 	dma_addr_t paddr;
 };
 
@@ -1439,7 +1439,11 @@ s805_dma_prep_memcpy (struct dma_chan *chan,
 	INIT_LIST_HEAD(&d->desc_list);
 	
 	desc_tbl = def_init_new_tdesc(c, d->frames);
-	d->frames ++;
+
+	if (!desc_tbl) {
+		kfree (d);
+		return NULL;
+	}
 	
 	desc_tbl->table->src = src;
 	desc_tbl->table->dst = dest;
@@ -1450,24 +1454,27 @@ s805_dma_prep_memcpy (struct dma_chan *chan,
 		
 		if ((desc_tbl->table->count + act_size) > S805_MAX_TR_SIZE) {
 			
+			list_add_tail(&desc_tbl->elem, &d->desc_list);
+			d->frames ++;
+			
 			desc_tbl = def_init_new_tdesc(c, d->frames);
 			
 			if (!desc_tbl)
 				goto error_allocation;
 			
 			desc_tbl->table->src = src + (dma_addr_t) bytes;
-			desc_tbl->table->dst = dest + (dma_addr_t) bytes;	
-
-			d->frames ++;
+			desc_tbl->table->dst = dest + (dma_addr_t) bytes;
 		}
 
 		desc_tbl->table->count += act_size;
 		bytes += act_size;		
 	}
-	
-	/* Ensure that the last descriptor will interrupt us. */
-	list_entry(d->desc_list.prev, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
 
+	/* Ensure that the last descriptor will interrupt us. */
+	desc_tbl->table->control |= S805_DTBL_IRQ;
+	list_add_tail(&desc_tbl->elem, &d->desc_list);
+	d->frames ++;
+				
 	add_zeroed_tdesc(d);
 	
 	return vchan_tx_prep(&c->vc, &d->vd, flags);
@@ -1481,7 +1488,6 @@ s805_dma_prep_memcpy (struct dma_chan *chan,
 		dma_pool_free(c->pool, desc_tbl->table, desc_tbl->paddr);
 		list_del(&desc_tbl->elem);
 		kfree(desc_tbl);
-		
 	}
 
 	kfree(d);
@@ -1528,7 +1534,7 @@ s805_dma_prep_memset (struct dma_chan *chan,
 	}
 	
 	d->memset->value = dma_alloc_coherent(chan->device->dev,
-										  sizeof(long long),
+										  sizeof(unsigned long long),
 										  &d->memset->paddr,
 										  GFP_NOWAIT); 
 	
@@ -1559,7 +1565,11 @@ s805_dma_prep_memset (struct dma_chan *chan,
     *d->memset->value |= (value & ~0U);
 	
 	desc_tbl = def_init_new_tdesc(c, d->frames);
-	d->frames ++;
+
+	if (!desc_tbl) {
+		kfree (d);
+		return NULL;
+	}
 	
 	desc_tbl->table->src = d->memset->paddr;
 	desc_tbl->table->dst = dest;
@@ -1570,6 +1580,9 @@ s805_dma_prep_memset (struct dma_chan *chan,
 		act_size = tmp_size > S805_MAX_TR_SIZE ? S805_MAX_TR_SIZE : tmp_size;
 		
 		if ((desc_tbl->table->count + act_size) > S805_MAX_TR_SIZE) {
+
+			list_add_tail(&desc_tbl->elem, &d->desc_list);
+			d->frames ++;
 			
 			desc_tbl = def_init_new_tdesc(c, d->frames);
 			
@@ -1579,8 +1592,6 @@ s805_dma_prep_memset (struct dma_chan *chan,
 			desc_tbl->table->src = d->memset->paddr;
 			desc_tbl->table->dst = dest + (dma_addr_t) bytes;	
 			desc_tbl->table->control |= S805_DTBL_SRC_HOLD;
-
-			d->frames ++;
 			
 		}
 
@@ -1589,7 +1600,9 @@ s805_dma_prep_memset (struct dma_chan *chan,
 	}
 
 	/* Ensure that the last descriptor will interrupt us. */
-	list_entry(d->desc_list.prev, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
+	desc_tbl->table->control |= S805_DTBL_IRQ;
+	list_add_tail(&desc_tbl->elem, &d->desc_list);
+	d->frames ++;
 
 	add_zeroed_tdesc(d);
 		
