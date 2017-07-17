@@ -286,7 +286,7 @@ config MMU
 choice
 	prompt "ARM system type"
 	default PLAT_MESON
-
+	  
 config ARCH_MULTIPLATFORM
 	bool "Allow multiple platforms to be selected"
 	depends on MMU

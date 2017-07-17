@@ -33,6 +33,13 @@
 #include <mach/mod_gate.h>
 #endif
 
+#ifdef CONFIG_ARCH_RANDOM
+#include <mach/hwrng.h>
+
+spinlock_t hwrng_lock;
+bool hwrng_skip;
+#endif
+
 #define MESON_RNG_AUTOSUSPEND_DELAY    100
 
 //#define DEBUG
@@ -48,6 +55,51 @@ struct meson_rng {
 	struct hwrng rng;
 };
 
+#ifdef CONFIG_ARCH_RANDOM
+int arch_get_random_long(unsigned long *v) {
+	
+	/* Portability */
+	if (BITS_PER_LONG == 32) 
+		return arch_get_random_int ((unsigned int *) v);
+	
+	spin_lock(&hwrng_lock);
+	
+	aml_read_reg32(P_VDIN_ASFIFO_CTRL2);
+	aml_read_reg32(P_VDIN_MATRIX_CTRL);
+	aml_read_reg32(P_PAD_PULL_UP_REG5);
+	
+	*v = aml_read_reg32(P_RAND64_ADDR0);
+	
+	*v <<= (sizeof(int) * 8);
+	*v |= (aml_read_reg32(P_RAND64_ADDR1) & ~0U);
+	
+	spin_unlock(&hwrng_lock);
+	
+	return 8;
+}
+
+int arch_get_random_int(unsigned int *v) {
+
+	spin_lock(&hwrng_lock);
+
+	aml_read_reg32(P_VDIN_ASFIFO_CTRL2);
+	aml_read_reg32(P_VDIN_MATRIX_CTRL);
+	aml_read_reg32(P_PAD_PULL_UP_REG5);
+	
+	if (!hwrng_skip)
+		*v = aml_read_reg32(P_RAND64_ADDR0);
+	else
+		*v = aml_read_reg32(P_RAND64_ADDR1);
+	
+	spin_unlock(&hwrng_lock);
+	
+	hwrng_skip = !hwrng_skip;
+		
+	return 4;
+
+}
+#endif
+
 static int meson_read(struct hwrng *rng, void *buf,
                       size_t max, bool wait)
 {
@@ -57,6 +109,10 @@ static int meson_read(struct hwrng *rng, void *buf,
 	
 	pm_runtime_get_sync(meson_rng->dev);
 
+#ifdef CONFIG_ARCH_RANDOM
+	spin_lock(&hwrng_lock);
+#endif
+	
 	// this will cause additional disturbances
 	aml_read_reg32(P_VDIN_ASFIFO_CTRL2);
 	aml_read_reg32(P_VDIN_MATRIX_CTRL);
@@ -66,6 +122,10 @@ static int meson_read(struct hwrng *rng, void *buf,
 	data[0] = aml_read_reg32(P_RAND64_ADDR0);
 	data[1] = aml_read_reg32(P_RAND64_ADDR1);
 
+#ifdef CONFIG_ARCH_RANDOM
+	spin_unlock(&hwrng_lock);
+#endif
+	
 	pm_runtime_mark_last_busy(meson_rng->dev);
 	pm_runtime_put_autosuspend(meson_rng->dev);
 
@@ -118,6 +178,11 @@ static int meson_rng_probe(struct platform_device *pdev)
 	print_state("a set_active");
 	pm_runtime_enable(&pdev->dev);
 
+#ifdef CONFIG_ARCH_RANDOM
+	spin_lock_init(&hwrng_lock);
+	hwrng_skip = false;
+#endif
+	
 	return hwrng_register(&meson_rng->rng);
 }
 

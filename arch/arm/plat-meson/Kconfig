@@ -122,6 +122,12 @@ config MESON_CPU_EMULATOR
 	help
 	  Enable support for Meson serial CPU running at VLSI Emulator
 
+config ARCH_RANDOM
+	def_bool y if ARCH_MESON8B
+	prompt "Meson 8B architectural random number generator" if EXPERT
+	---help---
+	  Enable the Meson8B architectural HW RNG.
+	  
 source "arch/arm/mach-meson6/Kconfig"
 source "arch/arm/mach-meson6tv/Kconfig"
 source "arch/arm/mach-meson6tvd/Kconfig"
