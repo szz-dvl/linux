@@ -40,7 +40,7 @@ obj-$(CONFIG_DMA_OMAP) += omap-dma.o
 obj-$(CONFIG_MMP_PDMA) += mmp_pdma.o
 
 s805_dmac-y := s805_dmaengine.o
-s805_dmac-$(CONFIG_S805_DMAC_CYCLIC_TO) += s805_dma_timer.o
+s805_dmac-$(CONFIG_S805_DMAC_TO) += s805_dma_timer.o
 
 obj-$(CONFIG_S805_DMAC) += s805_dmac.o
 

@@ -9,7 +9,13 @@
 
 #define S805_DMA_CTRL                    P_NDMA_CNTL_REG0
 #define S805_DMA_ENABLE                  BIT(14)                 /* Both CTRL and CLK resides in the same bit */
-#define S805_DMA_DMA_PM                  BIT(27)                 
+#define S805_DMA_DMA_PM                  BIT(27)
+
+#ifdef CONFIG_S805_DMAC_TO
+#define S805_DMA_TIME_OUT                CONFIG_S805_DMAC_TO_VAL  /* ms */
+#else
+#define S805_DMA_TIME_OUT                150  /* Used in terminate channel and channel release, for busy waiting a channel to free its pending transactions. */
+#endif
 
 #define __S805_DMAC
 
@@ -21,6 +27,11 @@ struct s805_dmadev
 	spinlock_t lock;                          /* General mgr lock. */
 	int irq_number;                           /* IRQ number. */
     uint chan_available;                      /* Amount of channels available. */
+	
+#ifndef CONFIG_S805_DMAC_SERIALIZE
+	uint max_thread;                          /* Max number of threads to be run in parallel */
+	uint thread_reset;                        /* Amount of transactions to be serialized before thread reset */
+#endif
 	
 	struct list_head scheduled;               /* List of descriptors currently scheduled. */
 	struct list_head in_progress;             /* List of descriptors in progress. */
@@ -81,7 +92,7 @@ struct s805_desc {
 	
 };
 
-#ifdef CONFIG_S805_DMAC_CYCLIC_TO
+#ifdef CONFIG_S805_DMAC_TO
 extern struct s805_dmadev *mgr;
 
 int s805_dma_to_init ( void );

@@ -54,43 +54,56 @@ config S805_DMAC
 
 	  If usure say N.
 
-config S805_DMAC_CYCLIC_TO
-	   bool "Time out for cyclic transfers."
+config S805_DMAC_TO
+	   bool "Time out for transactions."
 	   depends on S805_DMAC
 	   default n
 	   help
 			Cyclic transfers may generate a large amount of interrupts, and at
 			the same time, may be heavy for the hardware, leaving it in a perpetual
-			stalled state. This option will enable a timeout for this situation to
-			be treated properly in case of failure. As a pro we can guarantee that
-			hardware hangs or crashes will be properly handled, in the other hand,
-			if the time out value provided is not big enough big transactions may be
-			timed out while the transaction is rightfully unfinished.
-
-			After some testing, a value of 500 ms have been proved to support transfers
-			up to ~145MB of period lenght. When setting this value NOT cyclic transactions
-			must be taken into account too, since transactions will be parallelized as much
-			as possible, it is, if a cyclic transfer is active while other jobs
-			(not cyclic ones for an instance) are scheduled, time out will apply for
-			this transactions too, so the size limit will affect any transaction active
-			while a cyclic transaction is in progress. To overcome this situation
-			if a timeout is desired while big non cyclic transactions are expected
-			the channel holding the cyclic transaction may be paused while the other
-			transactions finish, or the big transactions may be splitted into several
-			small ones.
-
-			If selected, TIMER_A will be used to generate the time out interrupts.
-
-			Say Y if you are experiencing hardware crahes when cyclic transactions
-			are configured, othrewise say N.
+			stalled state. Besides, if more than one parallel transaction is running
+			at a time we may face hardware crashes with the same result.
 			
-config S805_DMAC_CYCLIC_TO_VAL
+			This option will enable a timeout for this situation to be treated properly
+			in case of failure. As a pro we can guarantee that hardware hangs or crashes
+			will be properly handled, in the other hand, if the time out value provided
+			is not big enough big transactions may be timed out while the transaction is
+			rightfully unfinished. After some testing, a value of 500 ms have been proved
+			to support transfers up to ~145MB of lenght. 
+			
+			If selected, TIMER_A will be used to generate the time out interrupts.
+			
+			Say Y if you are experiencing hardware crahes when cyclic transactions
+			are configured, or more than one transaction is running at a time,
+			othrewise say N.
+			
+config S805_DMAC_TO_VAL
 	   int "Provide timeout value (in milliseconds) for cyclic transfers."
-	   depends on S805_DMAC_CYCLIC_TO 
+	   depends on S805_DMAC_TO 
 	   range 10 5000
 	   default 500
 	   		
-
+config S805_DMAC_SERIALIZE
+	   bool "Serialize transactions."
+	   depends on S805_DMAC
+	   default n
+	   help
+			The s805 DMAC for Amlogic SoC provides four threads to allocate transactions.
+			If more than one transaction is allocated at the same time for different threads
+			those will be, in some manner, parallelized. This is at first sight an advantage
+			since we will be able to treat more transactions at once, however, hardware seems
+			to crash if more than one independent transaction is running at a time. A time
+			out value may help to mitigate this situation, and allow us to run more than one
+			transaction at a time, if this is not enough this option will force the engine to
+			use at most one of the availabe threads, thus guaranteeing that transactions are
+			serialized, this will make the queued waiting time of a transaction to increase, however
+			it will guarantee that tranasactions finish successfully. Notice that, if this option
+			is selected, a time out will be useless unless problems with tiny cyclic transfers
+			are detected.
+			
+			Say Y if you are experiencing hardware crahes when more than one transaction runs
+			at a time, othrewise say N. 
+			
 config INTEL_MID_DMAC
 	tristate "Intel MID DMA support for Peripheral DMA controllers"
 	depends on PCI && X86

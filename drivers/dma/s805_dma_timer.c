@@ -41,30 +41,46 @@ static void s805_dma_reschedule_broken ( struct s805_dmadev *m ) {
 
 	list_splice_tail_init(&m->completed, &head);
 	list_splice_tail_init(&m->in_progress, &head);
-
+	
 	list_for_each_entry_safe(d, temp, &head, elem) {
 		
-		if (d->vd.tx.next) 
-			list_move_tail(&d->elem, &m->completed); /* Cyclic transfer */
-		else {
+		if (d->vd.tx.next) {
+
+			spin_lock(&m->lock);
+			list_move_tail(&d->elem, &m->scheduled); /* Cyclic transfer */
+			spin_unlock(&m->lock);
+			
+		} else {
 			
 			spin_lock(&m->lock);
 			list_move(&d->elem, &m->scheduled); /* Re-schedule transactions that where in the batch in the moment of the time-out, giving them preference (in the head of the queue) */
 			spin_unlock(&m->lock);
 		}
+		
+#ifndef CONFIG_S805_DMAC_SERIALIZE
+		m->thread_reset ++;
+#endif
+		
 	}
+	
+#ifndef CONFIG_S805_DMAC_SERIALIZE
+	m->max_thread = 1; /* Force serialization for the same amount of descriptors that failed. */
+#endif
+
+	m->busy = false;
 
 }
+
 static irqreturn_t s805_dma_to_callback (int irq, void *data)
 {
 	struct s805_dmadev *m = data;
 	
-	if (m->cyclic_busy) {
+	if (m->busy) {
 		
-	    dev_warn(m->ddev.dev, "Cyclic transaction timed out, reseting device.\n");
+	    dev_warn(m->ddev.dev, "Transaction timed out, reseting device.\n");
 		
 		s805_dma_hard_reset();
-
+		
 		s805_dma_reschedule_broken(m);
 		tasklet_hi_schedule(&m->tasklet_completed);
 		

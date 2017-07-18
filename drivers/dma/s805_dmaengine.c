@@ -19,15 +19,16 @@
 #define S805_DMA_IRQ                     INT_NDMA
 #define S805_DMA_ALIGN_SIZE              sizeof(unsigned long long)
 
-#ifdef CONFIG_S805_DMAC_CYCLIC_TO
-#define S805_DMA_CYCLIC_TO               CONFIG_S805_DMAC_CYCLIC_TO_VAL  /* ms */
+#define S805_DMA_MAX_HW_THREAD           4
+
+#ifdef CONFIG_S805_DMAC_SERIALIZE
+#define S805_DMA_MAX_THREAD              1
 #else
-#define S805_DMA_CYCLIC_TO               150  /* Used in terminate channel and channel release, for busy waiting a channel to free its pending transactions. */
+#define S805_DMA_MAX_THREAD              S805_DMA_MAX_HW_THREAD
 #endif
 
 /* Registers & Bitmaps for the s805 DMAC */
 
-#define S805_DMA_MAX_THREAD              4
 #define S805_DMA_MAX_BURST               (0xFFFF - (S805_DMA_ALIGN_SIZE - 1))
 #define S805_DMA_MAX_SKIP                (0xFFFF - (S805_DMA_ALIGN_SIZE - 1))
 #define S805_MAX_TR_SIZE                 (0x1FFFFFF - (S805_DMA_ALIGN_SIZE - 1)) 
@@ -74,7 +75,7 @@ static inline struct s805_desc *to_s805_dma_desc(struct dma_async_tx_descriptor 
 	return container_of(t, struct s805_desc, vd.tx);
 }
 
-#ifdef CONFIG_S805_DMAC_CYCLIC_TO
+#ifdef CONFIG_S805_DMAC_TO
 struct s805_dmadev *mgr;
 #else
 static struct s805_dmadev *mgr;
@@ -1705,7 +1706,7 @@ static inline void s805_dma_enable_hw ( void ) {
 	
 	WR(status, S805_DMA_CTRL);
 
-	for (i = 0; i < S805_DMA_MAX_THREAD; i++)
+	for (i = 0; i < mgr->max_thread; i++)
 		s805_dma_thread_disable(i);
 	
 }
@@ -1903,13 +1904,13 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 			   the associated callback, and try to process any pending descriptors.
 			*/
 
-			spin_lock(&d->c->vc.lock);
+			//spin_lock(&d->c->vc.lock);
 			
 			c->status = S805_DMA_SUCCESS;
 			
 			vchan_cookie_complete(&d->vd);
 			
-			spin_unlock(&d->c->vc.lock);
+			//spin_unlock(&d->c->vc.lock);
 			
 			continue;
 		}
@@ -1918,9 +1919,9 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 		list_add_tail(&d->elem, &mgr->scheduled);
 		spin_unlock(&mgr->lock);
 
-		spin_lock(&d->c->vc.lock);
+		//spin_lock(&d->c->vc.lock);
 		d->c->pending ++;
-		spin_unlock(&d->c->vc.lock);
+		//spin_unlock(&d->c->vc.lock);
 
 		c->status = S805_DMA_IN_PROGRESS;	
 	}
@@ -1931,10 +1932,15 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 	
 	uint thread, thread_mask = 0;
 	struct s805_desc * d, * aux;
+
+#ifdef CONFIG_S805_DMAC_TO
+	if (!ini_thread)
+		s805_dma_to_stop(); /* To avoid false positives */
+#endif
 	
 	mgr->busy = (ini_thread > 0);
 	
-	for (thread = ini_thread; thread < S805_DMA_MAX_THREAD; thread ++) {
+	for (thread = ini_thread; thread < mgr->max_thread; thread ++) {
 
 		s805_dma_thread_disable(thread);
 		
@@ -1948,9 +1954,6 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 
 					if (!mgr->cyclic_busy) {
 						
-#ifdef CONFIG_S805_DMAC_CYCLIC_TO
-						s805_dma_to_stop(); /* To avoid false positives */
-#endif
 						mgr->cyclic_busy = true;
 						break;
 						
@@ -1997,18 +2000,41 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 		} 
 	}
 	
-#ifdef CONFIG_S805_DMAC_CYCLIC_TO
-	if (mgr->cyclic_busy)
-		s805_dma_to_start(S805_DMA_CYCLIC_TO);
+#ifdef CONFIG_S805_DMAC_TO
+	if (mgr->busy)
+		s805_dma_to_start(S805_DMA_TIME_OUT);
+#endif
+
+#ifndef CONFIG_S805_DMAC_SERIALIZE
+	if (mgr->busy && mgr->thread_reset)
+
+		mgr->thread_reset --;
+
+	else if (!mgr->busy) {
+
+		mgr->thread_reset = 0;
+		mgr->max_thread = S805_DMA_MAX_THREAD;
+		
+	}
 #endif
 	
-	for (thread = 0; thread < S805_DMA_MAX_THREAD; thread ++) {
+	for (thread = 0; thread < S805_DMA_MAX_HW_THREAD; thread ++) {
 
 		if ((thread < ini_thread) || (thread_mask & (1 << thread)))
 			s805_dma_thread_enable(thread);
 		else
 			s805_dma_thread_disable(thread);
 	}
+
+#ifndef CONFIG_S805_DMAC_SERIALIZE
+	if (!mgr->thread_reset || list_empty(&mgr->scheduled)) {
+		
+		mgr->thread_reset = 0;
+		mgr->max_thread = S805_DMA_MAX_THREAD;
+		
+	}
+#endif
+	
 }
 
 /* 
@@ -2052,8 +2078,8 @@ static void s805_dma_process_completed ( unsigned long null )
 	struct s805_desc * d, * temp, * next, * root;
 	uint thread = 0;
 
-#ifdef CONFIG_S805_DMAC_CYCLIC_TO
-	if (mgr->cyclic_busy)
+#ifdef CONFIG_S805_DMAC_TO
+	if (mgr->busy)
 		s805_dma_to_stop();
 #endif
 	
@@ -2079,16 +2105,16 @@ static void s805_dma_process_completed ( unsigned long null )
 						mgr->cyclic_busy = false;
 					
 					if (next->c->status != S805_DMA_PAUSED && mgr->cyclic_busy) {
-						
+
 						list_add_tail(&next->elem, &mgr->in_progress);
-						
+							
 						/* Must always return 0 */
 						s805_dma_allocate_tr (thread,
 											  list_first_entry(&next->desc_list, s805_dtable, elem),
 											  next->frames);
 						
 						thread ++;
-						
+							
 					} else {
 
 						mgr->cyclic_busy = false;
@@ -2201,7 +2227,7 @@ static void s805_dma_dismiss_chann ( struct s805_chan * c ) {
 static s805_status s805_dma_chan_wait_for_pending (struct s805_chan * c) {
 
 	unsigned long now;
-	unsigned int alive = (S805_DMA_CYCLIC_TO / 10) * 2; /* Two cyclic timeouts or about 300 ms if time out is not set. */
+	unsigned int alive = (S805_DMA_TIME_OUT / 10) * 2; /* Two cyclic timeouts or about 300 ms if time out is not set. */
 	
 	while (c->pending > 0 && alive) {
 		
@@ -2307,10 +2333,9 @@ static int s805_dma_control (struct dma_chan *chan,
 				c->status = S805_DMA_SUCCESS;
 				
 				if (vchan_issue_pending(&c->vc)) {
-					spin_unlock(&c->vc.lock);
 					
 					s805_dma_process_next_desc(c);
-					
+					spin_unlock(&c->vc.lock);
 					
 				} else {
 					
@@ -2439,9 +2464,9 @@ static void s805_dma_issue_pending(struct dma_chan *chan)
 	
 	spin_lock(&c->vc.lock);
 	if (vchan_issue_pending(&c->vc))  {
-		spin_unlock(&c->vc.lock);
 		
 		s805_dma_process_next_desc(c);
+		spin_unlock(&c->vc.lock);
 
 	} else
 		spin_unlock(&c->vc.lock);
@@ -2539,9 +2564,13 @@ static int s805_dmamgr_probe(struct platform_device *pdev)
 	
 	mgr->irq_number = S805_DMA_IRQ;
 	
-#ifdef CONFIG_S805_DMAC_CYCLIC_TO
+#ifndef CONFIG_S805_DMAC_SERIALIZE
+	mgr->max_thread = S805_DMA_MAX_THREAD;
+#endif
+	
+#ifdef CONFIG_S805_DMAC_TO
 	if (s805_dma_to_init())
-		return 0;
+		return -1;
 #endif
 	
 	return request_irq(mgr->irq_number, s805_dma_callback, 0, "s805_dmaengine_irq", mgr);
@@ -2563,7 +2592,7 @@ static void s805_dma_free(struct s805_dmadev *m)
 
 	free_irq(m->irq_number, m);
 	
-#ifdef CONFIG_S805_DMAC_CYCLIC_TO
+#ifdef CONFIG_S805_DMAC_TO
 	s805_dma_to_shutdown();
 #endif
 	
