@@ -1940,7 +1940,7 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 	
 	mgr->busy = (ini_thread > 0);
 	
-	for (thread = ini_thread; thread < mgr->max_thread; thread ++) {
+	for (thread = ini_thread; thread < mgr->max_thread && !mgr->cyclic_busy; thread ++) {
 
 		s805_dma_thread_disable(thread);
 		
@@ -1952,7 +1952,7 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 
 				if (d->vd.tx.next) {
 
-					if (!mgr->cyclic_busy) {
+					if (!mgr->busy) {
 						
 						mgr->cyclic_busy = true;
 						break;
@@ -1997,6 +1997,7 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 			thread_mask |= (1 << thread);
 			
 		    mgr->busy = true;
+
 		} 
 	}
 	

@@ -44,27 +44,26 @@ static void s805_dma_reschedule_broken ( struct s805_dmadev *m ) {
 	
 	list_for_each_entry_safe(d, temp, &head, elem) {
 		
-		if (d->vd.tx.next) {
-
-			spin_lock(&m->lock);
-			list_move_tail(&d->elem, &m->scheduled); /* Cyclic transfer */
-			spin_unlock(&m->lock);
+		if (d->vd.tx.next)
 			
-		} else {
+			list_move_tail(&d->elem, &m->completed); /* Cyclic transfer */
+		
+		else {
 			
 			spin_lock(&m->lock);
 			list_move(&d->elem, &m->scheduled); /* Re-schedule transactions that where in the batch in the moment of the time-out, giving them preference (in the head of the queue) */
 			spin_unlock(&m->lock);
 		}
 		
-#ifndef CONFIG_S805_DMAC_SERIALIZE
-		m->thread_reset ++;
-#endif
+/* #ifndef CONFIG_S805_DMAC_SERIALIZE */
+/* 		m->thread_reset ++; */
+/* #endif */
 		
 	}
 	
 #ifndef CONFIG_S805_DMAC_SERIALIZE
 	m->max_thread = 1; /* Force serialization for the same amount of descriptors that failed. */
+	m->thread_reset ++;
 #endif
 
 	m->busy = false;
