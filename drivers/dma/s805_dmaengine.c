@@ -278,6 +278,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 	uint act_size, icg, burst;
 		
 	d = init_nfo->d = to_s805_dma_desc(tx_desc);
+	d->xfer_2d = true;
 	
 	desc_tbl = sg_init_desc (NULL, init_nfo);
 	
@@ -543,6 +544,10 @@ s805_dma_prep_slave_sg( struct dma_chan *chan,
 
 	d->c = c;
 	d->frames = 0;
+
+	if (sg_len > 1)
+		d->xfer_2d = true;
+	
 	INIT_LIST_HEAD(&d->desc_list);
 	
 	/*
@@ -917,6 +922,8 @@ s805_dma_prep_interleaved (struct dma_chan *chan,
 			
 			/* if ( xt->sgl[idx].icg == 0 ) */
 			/* 	dev_warn(c->vc.chan.device->dev, "ICG size 0 received for data chunk %d while src_sgl / dst_sgl evaluates to true.\n", idx); */
+
+			d->xfer_2d = true;
 
 			if (!IS_ALIGNED(xt->sgl[idx].size, S805_DMA_ALIGN_SIZE)) {
 
@@ -1959,7 +1966,16 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 						
 					} else
 						goto next;
-
+					
+				} else if (d->xfer_2d) {
+					
+					if (!mgr->busy_2d) {
+						
+						mgr->busy_2d = true;
+						break;
+						
+					} else
+						goto next;
 				} else
 					break;
 				
@@ -1978,12 +1994,11 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 					list_del(&aux->elem);
 					s805_dma_desc_free(&aux->vd);
 				}
-				
 			}			
 		}
 		
 		if (d) {
-
+			
 			list_move_tail(&d->elem, &mgr->in_progress);
 			
 			d->next = s805_dma_allocate_tr (thread,
@@ -1997,7 +2012,6 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 			thread_mask |= (1 << thread);
 			
 		    mgr->busy = true;
-
 		} 
 	}
 	
@@ -2128,6 +2142,9 @@ static void s805_dma_process_completed ( unsigned long null )
 				} else {
 
 					dev_dbg(d->c->vc.chan.device->dev, "Marking cookie %d completed.\n", d->vd.tx.cookie);
+
+					if (d->xfer_2d)
+						mgr->busy_2d = false;
 					
 					spin_lock(&d->c->vc.lock);
 					
@@ -2159,6 +2176,9 @@ static void s805_dma_process_completed ( unsigned long null )
 					
 				} else {
 
+					if (d->xfer_2d)
+						mgr->busy_2d = false;
+
 					spin_lock(&mgr->lock);
 					list_move_tail(&d->elem, &mgr->scheduled);
 					spin_unlock(&mgr->lock);
@@ -2169,6 +2189,9 @@ static void s805_dma_process_completed ( unsigned long null )
 			
 			dev_dbg(d->c->vc.chan.device->dev, "Terminating transaction.\n");
 
+			if (d->xfer_2d)
+				mgr->busy_2d = false;
+			
 			if (d->vd.tx.next)
 				mgr->cyclic_busy = false;
 			

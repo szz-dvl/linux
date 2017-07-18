@@ -55,6 +55,9 @@ struct s805_desc {
 
 	/* For transactions with more than S805_DMA_MAX_DESC data chunks. */
 	s805_dtable * next;
+
+	/* 2D mode, meant to detect 2D transactions to serialize them */
+	bool xfer_2d;
 	
 };
 

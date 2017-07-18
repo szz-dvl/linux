@@ -39,7 +39,8 @@ struct s805_dmadev
 	struct list_head completed;               /* List of descriptors completed. */
 	
 	struct tasklet_struct tasklet_completed;  /* Tasklet for bh processing of interrupts. */
-	
+
+	bool busy_2d;  
 	bool cyclic_busy;
 	bool busy;
 };
@@ -90,6 +91,9 @@ struct s805_desc {
 
 	/* For transactions with more than S805_DMA_MAX_DESC data chunks. */
 	s805_dtable * next;
+
+	/* 2D mode, meant to detect 2D transactions to serialize them */
+	bool xfer_2d;
 	
 };
 
