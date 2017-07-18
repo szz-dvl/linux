@@ -27,9 +27,10 @@ struct s805_dmadev
 	spinlock_t lock;                          /* General mgr lock. */
 	int irq_number;                           /* IRQ number. */
     uint chan_available;                      /* Amount of channels available. */
+
+	uint max_thread;                          /* Max number of threads to be run in parallel */
 	
 #ifndef CONFIG_S805_DMAC_SERIALIZE
-	uint max_thread;                          /* Max number of threads to be run in parallel */
 	uint thread_reset;                        /* Amount of transactions to be serialized before thread reset */
 #endif
 	

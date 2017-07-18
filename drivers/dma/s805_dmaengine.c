@@ -1706,7 +1706,7 @@ static inline void s805_dma_enable_hw ( void ) {
 	
 	WR(status, S805_DMA_CTRL);
 
-	for (i = 0; i < mgr->max_thread; i++)
+	for (i = 0; i < S805_DMA_MAX_HW_THREAD; i++)
 		s805_dma_thread_disable(i);
 	
 }
@@ -2563,10 +2563,7 @@ static int s805_dmamgr_probe(struct platform_device *pdev)
 	dev_info(&pdev->dev, "DMA legacy API manager at 0x%p\n", mgr);
 	
 	mgr->irq_number = S805_DMA_IRQ;
-	
-#ifndef CONFIG_S805_DMAC_SERIALIZE
 	mgr->max_thread = S805_DMA_MAX_THREAD;
-#endif
 	
 #ifdef CONFIG_S805_DMAC_TO
 	if (s805_dma_to_init())
