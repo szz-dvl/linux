@@ -115,27 +115,6 @@ show_pools(struct device *dev, struct device_attribute *attr, char *buf)
 
 static DEVICE_ATTR(pools, S_IRUGO, show_pools, NULL);
 
-/**
- * dma_pool_create - Creates a pool of consistent memory blocks, for dma.
- * @name: name of pool, for diagnostics
- * @dev: device that will be doing the DMA
- * @size: size of the blocks in this pool.
- * @align: alignment requirement for blocks; must be a power of two
- * @boundary: returned blocks won't cross this power of two boundary
- * Context: !in_interrupt()
- *
- * Returns a dma allocation pool with the requested characteristics, or
- * null if one can't be created.  Given one of these pools, dma_pool_alloc()
- * may be used to allocate memory.  Such memory will all have "consistent"
- * DMA mappings, accessible by the device and its driver without using
- * cache flushing primitives.  The actual size of blocks allocated may be
- * larger than requested because of alignment.
- *
- * If @boundary is nonzero, objects returned from dma_pool_alloc() won't
- * cross that size boundary.  This is useful for devices which have
- * addressing restrictions on individual DMA transfers, such as not crossing
- * boundaries of 4KBytes.
- */
 struct dma_pool *__dma_pool_create(const char *name, struct device *dev,
 								   size_t size, size_t align, size_t boundary, dma_pool_free_t free_t)
 {
@@ -202,6 +181,28 @@ struct dma_pool *__dma_pool_create(const char *name, struct device *dev,
 	return retval;
 }
 
+/**
+ * dma_pool_create - Creates a pool of consistent memory blocks, for dma.
+ * @name: name of pool, for diagnostics
+ * @dev: device that will be doing the DMA
+ * @size: size of the blocks in this pool.
+ * @align: alignment requirement for blocks; must be a power of two
+ * @boundary: returned blocks won't cross this power of two boundary
+ * Context: !in_interrupt()
+ *
+ * Returns a dma allocation pool with the requested characteristics, or
+ * null if one can't be created.  Given one of these pools, dma_pool_alloc()
+ * may be used to allocate memory.  Such memory will all have "consistent"
+ * DMA mappings, accessible by the device and its driver without using
+ * cache flushing primitives.  The actual size of blocks allocated may be
+ * larger than requested because of alignment.
+ *
+ * If @boundary is nonzero, objects returned from dma_pool_alloc() won't
+ * cross that size boundary.  This is useful for devices which have
+ * addressing restrictions on individual DMA transfers, such as not crossing
+ * boundaries of 4KBytes.
+ */
+
 struct dma_pool * dma_pool_create(const char *name, struct device *dev,
 					 size_t size, size_t align, size_t boundary) {
 
@@ -209,6 +210,21 @@ struct dma_pool * dma_pool_create(const char *name, struct device *dev,
 
 }
 EXPORT_SYMBOL(dma_pool_create);
+
+/**
+ * dma_pool_create_restore - Creates a pool of consistent memory blocks, for dma.
+ * @name: name of pool, for diagnostics
+ * @dev: device that will be doing the DMA
+ * @size: size of the blocks in this pool.
+ * @align: alignment requirement for blocks; must be a power of two
+ * @boundary: returned blocks won't cross this power of two boundary
+ * Context: !in_interrupt()
+ *
+ * Documentation for dma_pool_create() applies here, however if this version of 
+ * pool is created the policy for block freeing will variate from the standard 
+ * one. Meant to be used by devices that cannot guarantee that the amount of 
+ * blocks used in each transaction will be the same.
+ */
 
 struct dma_pool * dma_pool_create_restore(const char *name, struct device *dev,
 							 size_t size, size_t align, size_t boundary) {
@@ -218,6 +234,24 @@ struct dma_pool * dma_pool_create_restore(const char *name, struct device *dev,
 }
 EXPORT_SYMBOL(dma_pool_create_restore);
 
+/**
+ * dma_pool_create_norestore - Creates a pool of consistent memory blocks, for dma.
+ * @name: name of pool, for diagnostics
+ * @dev: device that will be doing the DMA
+ * @size: size of the blocks in this pool.
+ * @align: alignment requirement for blocks; must be a power of two
+ * @boundary: returned blocks won't cross this power of two boundary
+ * Context: !in_interrupt()
+ *
+ * Documentation for dma_pool_create() applies here, however if this version of 
+ * pool is created the policy for block freeing will variate from the standard 
+ * one. For this version of pool page offsets will be reinitialised ONLY when 
+ * the page becames free, it is, page->in_use == 0. Meant to be used by devices 
+ * that cannot guarantee that the amount of blocks used in each transaction will 
+ * be the same and, at the same time, critical information may be stored in the 
+ * firsts 4 bytes of each block, more detailed information can be found in 
+ * dma_pool_get_restore_offset(). 
+ */
 struct dma_pool * dma_pool_create_norestore(const char *name, struct device *dev,
 							   size_t size, size_t align, size_t boundary) {
 
@@ -417,13 +451,14 @@ static unsigned int dma_pool_get_restore_offset (struct dma_pool *pool, struct d
 	   have the chance to be a multiple of pool->size and are between pool->size and pool->allocation. If this is the case dma_pool_create_norestore can be used.
 	*/
 	
-	int offset = page->offset;
-	uint bsize = pool->size;
 	
-	while ( offset == ((*(int *)(page->vaddr + offset)) - bsize) )
+	uint bsize = pool->size;
+	int offset = page->offset - bsize;
+	
+	while ( offset >= 0 && offset == ((*(int *)(page->vaddr + offset)) - bsize) )
 		offset -= bsize;
 	
-	return offset >= 0 ? offset + bsize : 0;
+	return offset + bsize;
 }
 
 /**

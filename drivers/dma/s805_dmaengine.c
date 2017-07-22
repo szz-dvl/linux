@@ -59,7 +59,18 @@ struct memset_info {
 	dma_addr_t paddr;
 };
 
-/* Auxiliar structure for sg lists */
+/**
+ * struct sg_info - Auxiliar structure to iterate sg lists.
+ * 
+ * @cursor: Current entry, will point to the sg entry beeing treated or %NULL 
+ * if all the list has been treated.
+ * 
+ * @next: Next entry, will point the entry immediately consecutive to the one being treated, 
+ * or %NULL if @cursor points to the last entry in the list.
+ *
+ * @bytes: Amount of bytes already consumed from the current entry being treated.
+ *
+ */
 struct sg_info {
 
     struct scatterlist * cursor;
@@ -73,6 +84,12 @@ static inline struct s805_desc *to_s805_dma_desc(struct dma_async_tx_descriptor 
 	return container_of(t, struct s805_desc, vd.tx);
 }
 
+/**
+ * struct s805_dmadev - General manager for the driver, will hold the lists of descriptors
+ * among other fields nedded for the driver. More detailed information can be found in the 
+ * file "s805_dmac.h" in the same directory that this file resides. 
+ *
+ */
 #ifdef CONFIG_S805_DMAC_TO
 struct s805_dmadev *mgr;
 #else
@@ -88,12 +105,15 @@ static const struct of_device_id s805_dma_of_match[] =
 	};
 MODULE_DEVICE_TABLE(of, s805_dma_of_match);
 
-/* 
-   
-   Adds a zeroed descriptor at the end of the current list. 
-   To detect the end of the transaction. 
-   
-*/
+/**
+ * add_zeroed_tdesc - This will set the control bit S805_DTBL_IRQ for the last 
+ * chunk in the list, to ensure that the last descriptor will interrupt us, 
+ * so we can properly handle the end of the transaction. After this a zeroed 
+ * chunk will be added at the end of the current list, by way of padding. 
+ *
+ * @d: The descriptor to be closed.
+ *  
+ */
 static s805_dtable * add_zeroed_tdesc (struct s805_desc * d)
 {
 	
@@ -120,7 +140,13 @@ static s805_dtable * add_zeroed_tdesc (struct s805_desc * d)
 	return desc_tbl;
 }
 
-/* Auxiliar function to initialize descriptors. */
+/**
+ * def_init_new_tdesc - Auxiliar function to initialize data chunks. 
+ * 
+ * @c: Channel holding the pool that will store the data chunk.
+ * @frames: Amount of frames already stored in the list.
+ *
+ */
 static s805_dtable * def_init_new_tdesc (struct s805_chan * c, unsigned int frames)
 {
 	
@@ -147,13 +173,13 @@ static s805_dtable * def_init_new_tdesc (struct s805_chan * c, unsigned int fram
 	   
 	   Process the whole descriptor at once, without thread switching. 
 	   
-	   This needs to be tested with this approach, if this bit is set the threads will be processed at once, 
+	   This needs to be carefully tested with this approach, if this bit is set the threads will be processed at once, 
 	   without thread switching, what will make that the interrupts to be delivered more separated in time, however
 	   if this bit is not set the work of the active threads will be, in some manner, balanced so if we see the
 	   the 4 threads, with its possible active transactions, as a batch of transactions (what is actually what this
 	   implementation tries) to not set this bit may be a benefit, specially if "in_progress" transactions differ
 	   in size. In the other hand if "in_progress" transactions are similar in size interrupts may be delivered very
-	   close in time, hence "nestedly preempted", what may cause malfunction.
+	   close in time, leading to hardware failures.
 	   
 	   As exposed above, to be tested. 
 																		 
@@ -161,15 +187,6 @@ static s805_dtable * def_init_new_tdesc (struct s805_chan * c, unsigned int fram
 
 	if (!((frames + 1) % S805_DMA_MAX_DESC))
 		desc_tbl->table->control |= S805_DTBL_IRQ;
-	/* 
-	   This bit will be set for every S805_DMA_MAX_DESC = 128 data chunks. Since the pool will allocate, in first instance, a whole page to deliver our 
-	   32 Bytes blocks if more than PAGE_SIZE / 32 = 128 blocks are allocated for a transaction and the new page allocated by the pool is not contiguous 
-	   with the latter one descriptors won't be contiguous in memory, hence the hardware won't be able to fetch the descriptor 129 letting the transaction 
-	   unfinished. So we force an interrupt every S805_DMA_MAX_DESC to reallocate the adresses in the hardware registers every time the page where the 
-	   descriptors reside attempts to change. Being realistic the pool will jump the last block on a page to force non contiguity when the page change
-	   for the same reason mentioned above, hence our real limit will be S805_DMA_MAX_DESC = 127.
-	   
-	*/
 		
 	return desc_tbl;
 	
@@ -177,6 +194,13 @@ static s805_dtable * def_init_new_tdesc (struct s805_chan * c, unsigned int fram
 
 /* Auxiliar functions for DMA_SG: */
 
+/**
+ * fwd_sg - Auxiliar fucntion meant to iterate sg lists, this will forward 
+ * the cursor for the current entry.
+ * 
+ * @info: sg_info struct holding the pointers to the involved sg entries.
+ *
+ */
 static inline void fwd_sg (struct sg_info * info) {
 
 	if (info->cursor) {
@@ -194,6 +218,12 @@ static inline void fwd_sg (struct sg_info * info) {
 			
 }
 
+/**
+ * get_sg_icg - Will get the ICG (inter-chunk-gap) for the given sg_info struct.
+ * 
+ * @info: sg_info struct holding the pointers to the involved sg entries.
+ *
+ */
 static uint get_sg_icg (struct sg_info * info) {
 
 	/* 
@@ -207,6 +237,13 @@ static uint get_sg_icg (struct sg_info * info) {
 		return 0;
 }
 
+/**
+ * get_sg_remain - Will get the remaining bytes for the current entry being treated,
+ * the one pointed by @cursor.
+ * 
+ * @info: sg_info struct holding the pointers to the involved sg entries.
+ *
+ */
 static uint get_sg_remain (struct sg_info * info) {
 	
 	if (info->cursor)
@@ -215,16 +252,14 @@ static uint get_sg_remain (struct sg_info * info) {
 		return UINT_MAX; /* For convenience in s805_scatterwalk */
 }
 
-static s805_dtable * sg_move_along (s805_dtable * cursor, struct s805_desc *d) {
-
-	if (cursor) {
-		list_add_tail(&cursor->elem, &d->desc_list);
-		d->frames ++;
-	}
-	
-	return def_init_new_tdesc(d->c, d->frames);
-	
-}
+/**
+ * sg_ent_complete - Will return %true if the current entry, the one pointed 
+ * by @cursor is complete, it is, if all the bytes in the current sg_entry are 
+ * consumed, otherwise %false will be returned.
+ * 
+ * @info: sg_info struct holding the pointers to the involved sg entries.
+ *
+ */
 
 static bool sg_ent_complete (struct sg_info * info) {
 
@@ -234,19 +269,52 @@ static bool sg_ent_complete (struct sg_info * info) {
 		return false;
 }
 
-static s805_dtable * sg_init_desc (s805_dtable * cursor, s805_init_desc * init_nfo) {
+/**
+ * sg_move_along - This function will be used by those iterating sg lists, however,
+ * no struct sg_info is involved, so what this function will do is store the current
+ * data chunk, which will hold information from sg_lists, in the given descriptor and
+ * return a new empty chunk.
+ * 
+ * @chunk: The data chunk to be stored in the descriptor list.
+ * @d: The descriptor holding the target list.
+ *
+ */
+static s805_dtable * sg_move_along (s805_dtable * chunk, struct s805_desc *d) {
+
+	if (chunk) {
+		list_add_tail(&chunk->elem, &d->desc_list);
+		d->frames ++;
+	}
+	
+	return def_init_new_tdesc(d->c, d->frames);
+	
+}
+
+/**
+ * sg_init_desc - This function is meant to abstract the process of chunk initialisation 
+ * for s805_scatterwalk(), depending on the type stored in @init_info a different new empty
+ * chunk will be returned. Needed by crypto drivers to initialise its particular data chunks.
+ * Notice that for each possible type, those defined in "linux/s805_dmac.h", it will be a
+ * public function available, prototypes for those will be found in the same file.
+ *
+ * @chunk: The data chunk to be stored in the descriptor list.
+ * @init_nfo: Struct holding the needed information for a particular chunck initialisation
+ * aswell as the pointer to the descriptor holding the target list.
+ *
+ */
+static s805_dtable * sg_init_desc (s805_dtable * chunk, s805_init_desc * init_nfo) {
 
 	switch(init_nfo->type) {
 	case BLKMV_DESC:
-		return sg_move_along (cursor, init_nfo->d);
+		return sg_move_along (chunk, init_nfo->d);
 	case AES_DESC:
-		return sg_aes_move_along (cursor, init_nfo);
+		return sg_aes_move_along (chunk, init_nfo);
 	case TDES_DESC:
-		return sg_tdes_move_along (cursor, init_nfo);
+		return sg_tdes_move_along (chunk, init_nfo);
 	case CRC_DESC:
-		return sg_crc_move_along (cursor, init_nfo);
+		return sg_crc_move_along (chunk, init_nfo);
 	case DIVX_DESC:
-		return sg_divx_move_along (cursor, init_nfo);
+		return sg_divx_move_along (chunk, init_nfo);
 	default:
 		return NULL;
 	}
@@ -254,6 +322,13 @@ static s805_dtable * sg_init_desc (s805_dtable * cursor, s805_init_desc * init_n
 
 /* Public functions, for crypto modules */
 
+/**
+ * s805_close_desc - Public funtion offered to crypto modules through "linux/s805_dmac.h", 
+ * meant to close an already settled up descriptor.
+ *
+ * @tx_desc: The descriptor to be closed.
+ *
+ */
 bool s805_close_desc (struct dma_async_tx_descriptor * tx_desc) {
 
 	struct s805_desc *d = to_s805_dma_desc(tx_desc);
@@ -261,6 +336,20 @@ bool s805_close_desc (struct dma_async_tx_descriptor * tx_desc) {
 	return add_zeroed_tdesc(d);
 }
 
+/**
+ * s805_scatterwalk - This function will "translate" sg lists into a list of data chunks suitable 
+ * for the hardware and return the associated descriptor. This function is made available to crypto
+ * modules in the file "linux/s805_dmac.h".
+ *
+ * @src_sg: Source sg list.
+ * @dst_sg: Destination sg list.
+ * @init_nfo: Struct holding the needed information for a particular chunck initialisation.
+ * @tx_desc: Already initialised descriptor, usefull to add information to a descriptor as many 
+ * times as needed.
+ * @last: Boolean value indicating if it will be the last time the descriptor pointed by @tx_desc
+ * will be passed to this function, it is, if we must close the descriptor.
+ *
+ */
 struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 												   struct scatterlist * dst_sg,
 												   s805_init_desc * init_nfo,
@@ -434,7 +523,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 	
 	if (last) {
 		
-		if(!s805_close_desc(tx_desc))
+		if(!add_zeroed_tdesc(d))
 			goto error_allocation;
 		
 	}
@@ -464,10 +553,14 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 /* END of Public functions, for crypto modules */
 /* END of Auxiliar functions for DMA_SG */
 
-/* 
-   Bypass function for dma_prep_slave_sg (dmaengine interface) 
-   
-*/
+
+/**
+ * s805_dma_prep_slave_sg - Endpoint function for device_prep_slave_sg() (dmaengine interface).
+ * Provides DMA_SLAVE capability. 
+ *
+ * @args: Argument documentation can be found in "linux/dmaengine.h".
+ *
+ */
 
 static struct dma_async_tx_descriptor * 
 s805_dma_prep_slave_sg( struct dma_chan *chan,
@@ -488,14 +581,8 @@ s805_dma_prep_slave_sg( struct dma_chan *chan,
 	dma_addr_t addr;
 	u16 * my_burst, * my_skip;
 	bool new_block;
-	
-	/*
-	  
-	  Is needed to check here for src/dst device FIFO to be at least S805_MAX_TR_SIZE ??
-	  to not overwrite unknown memory positions?? ... How to do this??
-	  
-	*/
 
+	
 	/* RapidIO not supported */
 	if (context != NULL) {
 
@@ -788,7 +875,16 @@ s805_dma_prep_slave_sg( struct dma_chan *chan,
 	return NULL; 
 }
 
-/* Auxiliar function to initialise descriptors (interleaved) */
+/**
+ * ileaved_def_init_new_tdesc - Auxiliar function to initialise descriptors (interleaved).
+ * 
+ * @c: Channel holding the pool that will deliver the new empty chunk.
+ * @xt: struct dma_interleaved_template with the configuration provided.
+ * @burst_and_skip: Countage of bytes spent till the moment, both data bytes and skip or gap bytes. 
+ * @count: Countage of bytes spent till the moment, only data bytes, gaps not added.
+ * @frames: Number of frames or chunks spent till the moment.
+ *
+ */
 static s805_dtable * ileaved_def_init_new_tdesc (struct s805_chan *c,
 												 struct dma_interleaved_template *xt,
 												 int burst_and_skip,
@@ -830,31 +926,32 @@ static s805_dtable * ileaved_def_init_new_tdesc (struct s805_chan *c,
 }
 
 
-/*
-  Documentation is a little bit confusing for "device_prep_interleaved_dma", in the following lines of "include/linux/dmaengine.h" one can read:
-
-  120 -> struct data_chunk - Element of scatter-gather list that makes a frame.
-  
-  [ . . . ]
-  
-  134 -> struct dma_interleaved_template - Template to convey DMAC the transfer pattern and attributes.
-  
-  [ . . . ]
-
-  147 -> @numf: Number of frames in this template.
-  148 -> @frame_size: Number of chunks in a frame i.e, size of sgl[].
-
-  The concept of frame is a little bit confusing to me, so I'm using "frame_size" as the reference value to iterate the chunks stored in "sgl", hence, 
-  "numf" is ignored for this implementation. To my knowledge, to support more than one frame per transaction we will need to modify the interface
-  to accept an array of "dma_interleaved_template" structs as a parameter. In the following link I found a patch implementing this idea:
-
-       * http://lists.infradead.org/pipermail/linux-arm-kernel/2014-February/233185.html
-
-  However I'm trying to modify the interfece the minimum possible, and, any change made in it will be an addition, to expose some of the capabilities
-  supported by the hardware not present in 3.x (such as "device_prep_dma_memset" or "device_prep_dma_memcpy") in a confortable way for the user. No 
-  change will be done, then, in the existent interface, especially for portability reasons.
-  
-*/
+/**
+ * s805_dma_prep_interleaved - Endpoint function for device_prep_interleaved_dma() (dmaengine interface).
+ * Provides DMA_INTERLEAVE capability. 
+ *
+ * @args: Argument documentation can be found in "linux/dmaengine.h".
+ *
+ * Note: Documentation is a little bit confusing for "device_prep_interleaved_dma", in the following lines of "linux/dmaengine.h" one can read:
+ *
+ * 120 -> struct data_chunk - Element of scatter-gather list that makes a frame.
+ *
+ * [ . . . ]
+ *
+ * 134 -> struct dma_interleaved_template - Template to convey DMAC the transfer pattern and attributes.
+ * 
+ * [ . . . ]
+ *
+ * 147 -> @numf: Number of frames in this template.
+ * 148 -> @frame_size: Number of chunks in a frame i.e, size of sgl[].
+ *
+ * The concept of frame is not very concrete, so the driver is using "@xt->frame_size" as the reference value to iterate the chunks stored in "@xt->sgl", 
+ * hence, "@xt->numf" is ignored for this implementation. To support more than one frame per transaction the interface will need to be modified
+ * to accept an array of "dma_interleaved_template" structs as a parameter. In the following link a patch implementing this idea is provided:
+ *
+ *      (*) http://lists.infradead.org/pipermail/linux-arm-kernel/2014-February/233185.html
+ *
+ */
 
 static struct dma_async_tx_descriptor * 
 s805_dma_prep_interleaved (struct dma_chan *chan, 
@@ -1063,6 +1160,20 @@ s805_dma_prep_interleaved (struct dma_chan *chan,
 	return NULL;
 }
 
+/**
+ * cyclic_def_init_new_tdesc - Auxiliar function to initialise descriptors (cyclic).
+ * 
+ * @src_addr: Source dma address.
+ * @dst_addr: Destination dma address.
+ * @direction: Direction of the transaction.
+ * @byte_count: Countage of bytes spent till the moment.
+ * @period_count: Countage of period bytes spent till the moment, reinitialised for each period, 
+ * only usefull for direction DMA_MEM_TO_MEM.
+ * @addr_reset: Boolean value indicating how adresses must be arranged, only usefull for 
+ * direction DMA_MEM_TO_MEM.
+ * @frames: Number of frames or chunks spent till the moment.
+ *
+ */
 static s805_dtable * cyclic_def_init_new_tdesc (struct s805_chan *c,
 												dma_addr_t src_addr,
 												dma_addr_t dst_addr,
@@ -1073,7 +1184,7 @@ static s805_dtable * cyclic_def_init_new_tdesc (struct s805_chan *c,
 												uint frames) {
 	
 	s805_dtable *desc_tbl = def_init_new_tdesc(c, frames);
-
+	
 	if (!desc_tbl) 
 	    return NULL;
 
@@ -1113,6 +1224,13 @@ static s805_dtable * cyclic_def_init_new_tdesc (struct s805_chan *c,
 	return desc_tbl;
 }
 
+/**
+ * s805_dma_prep_dma_cyclic - Endpoint function for device_prep_dma_cyclic() (dmaengine interface).
+ * Provides DMA_CYCLIC capability. 
+ *
+ * @args: Argument documentation can be found in "linux/dmaengine.h".
+ *
+ */
 static struct dma_async_tx_descriptor *
 s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 						  dma_addr_t buf_addr,
@@ -1338,6 +1456,13 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 	return NULL;
 }
 
+/**
+ * s805_dma_prep_sg - Endpoint function for device_prep_dma_sg() (dmaengine interface).
+ * Provides DMA_SG capability. 
+ *
+ * @args: Argument documentation can be found in "linux/dmaengine.h".
+ *
+ */
 static struct dma_async_tx_descriptor *
 s805_dma_prep_sg (struct dma_chan *chan,
 				  struct scatterlist *dst_sg, unsigned int dst_nents,
@@ -1412,6 +1537,13 @@ s805_dma_prep_sg (struct dma_chan *chan,
 	return tx_desc;
 }
 
+/**
+ * s805_dma_prep_memcpy - Endpoint function for device_prep_dma_memcpy() (dmaengine interface).
+ * Provides DMA_MEMCPY capability. 
+ *
+ * @args: Argument documentation can be found in "linux/dmaengine.h".
+ *
+ */
 struct dma_async_tx_descriptor *
 s805_dma_prep_memcpy (struct dma_chan *chan,
 					  dma_addr_t dest,
@@ -1501,6 +1633,13 @@ s805_dma_prep_memcpy (struct dma_chan *chan,
 	return NULL;
 }
 
+/**
+ * s805_dma_prep_memset - Endpoint function for device_prep_dma_memset() (dmaengine interface).
+ * Provides DMA_MEMSET capability. 
+ *
+ * @args: Argument documentation can be found in "linux/dmaengine.h".
+ *
+ */
 struct dma_async_tx_descriptor *
 s805_dma_prep_memset (struct dma_chan *chan,
 					  dma_addr_t dest,
@@ -1563,8 +1702,6 @@ s805_dma_prep_memset (struct dma_chan *chan,
 	  array or a buffer of integers (positions of 32 bits long) the desired result will 
 	  be achieved, however the buffer MUST be aligned to 8 Bytes to avoid writting 
 	  undesired addresses. 
-	  
-	  To be tested!
 	  
 	*/
 	
@@ -1640,22 +1777,17 @@ s805_dma_prep_memset (struct dma_chan *chan,
 	
 } 
 
+/**
+ * s805_dma_prep_interrupt - Endpoint function for device_prep_dma_interrupt() (dmaengine interface).
+ * Provides DMA_ASYNC_TX and DMA_INTERRUPT capabilities. 
+ *
+ * @args: Argument documentation can be found in "linux/dmaengine.h".
+ *
+ */
 struct dma_async_tx_descriptor *
 s805_dma_prep_interrupt (struct dma_chan *chan,
 						 unsigned long flags)
 {
-
-
-	/* 
-	   I don't know exactly what is expected for this capability, with this implementation a 
-	   new descriptor will be allocated and when the associated descriptor happens to be issued 
-	   this cookie will be marked as completed, hence the associated callback (defined by the user)
-	   will be called. So if the "dma_async_tx_descriptor" returned from this function belongs to a 
-	   chain of descriptors, particullary its the last of a chain of descriptors, the associated 
-	   callback will be triggered. As mentioned above I'm not sure if this is the expected behaviour 
-	   for dma_prep_interrupt, if it is not, please correct it.  
- 
-	*/
 
 	struct s805_chan *c = to_s805_dma_chan(chan);
 	struct s805_desc *d;
@@ -1674,13 +1806,12 @@ s805_dma_prep_interrupt (struct dma_chan *chan,
 
 }
 
-/*
-  
-  Write general CLK AND DMA_CTRL register to enable engine  
-  
-*/
-
-/* Start the given thread */
+/**
+ * s805_dma_thread_enable - Start the given thread. 
+ *
+ * @thread_id: Id of the thread to be enabled, between 0 and (%S805_DMA_MAX_HW_THREAD - 1).
+ *
+ */
 static inline void s805_dma_thread_enable ( uint thread_id ) { 
 	
 	u32 reg_val;
@@ -1694,7 +1825,12 @@ static inline void s805_dma_thread_enable ( uint thread_id ) {
 	
 }
 
-/* Stop the given thread */
+/**
+ * s805_dma_thread_disable - Stop the given thread. 
+ *
+ * @thread_id: Id of the thread to be disabled, between 0 and (%S805_DMA_MAX_HW_THREAD - 1).
+ *
+ */
 static inline void s805_dma_thread_disable ( uint thread_id ) { 
 	
 	u32 reg_val;
@@ -1703,6 +1839,10 @@ static inline void s805_dma_thread_disable ( uint thread_id ) {
 	WR(reg_val & ~S805_DMA_THREAD_ENABLE(thread_id), S805_DMA_THREAD_CTRL);
 }
 
+/**
+ * s805_dma_thread_disable - Write general CLK and DMA_CTRL register to enable engine. 
+ *
+ */
 static inline void s805_dma_enable_hw ( void ) { 
 
 	uint i;
@@ -1722,7 +1862,12 @@ static inline void s805_dma_enable_hw ( void ) {
 	
 }
 
-/* Function passed to virtual channels to free resources */
+/**
+ * s805_dma_desc_free - Will free the associated descriptor. Passed to virtual channels to free resources.
+ *
+ * @vd: Virtual descriptor associated to our descriptor.
+ *
+ */
 static void s805_dma_desc_free(struct virt_dma_desc *vd)
 {
 	struct s805_desc * aux, *cursor, * me = to_s805_dma_desc(&vd->tx);
@@ -1781,6 +1926,14 @@ static void s805_dma_desc_free(struct virt_dma_desc *vd)
 		tasklet_enable(&c->vc.task);
 }
 
+/**
+ * s805_dma_get_next_addr - Meant to be used for decriptors with more than %S805_DMA_MAX_DESC, 
+ * to get the next chunk to be processed when the yet unprocessed %S805_DMA_MAX_DESC chunks finish, 
+ * it is, the chunk @desc + %S805_DMA_MAX_DESC.
+ *
+ * @desc: First chunk of the batch.
+ *
+ */
 static s805_dtable * s805_dma_get_next_addr (s805_dtable * desc) {
 
 	s805_dtable * dtbl = desc;
@@ -1793,15 +1946,16 @@ static s805_dtable * s805_dma_get_next_addr (s805_dtable * desc) {
 	return dtbl;
 }
 
-/*
-  
-  Write s805 DMAC registers with start and end address of table descriptor list
-  
-  @addr: address of the descriptor to be processed.
-  @frames: amount of descriptors to be processed.
-  
-*/
-
+/**
+ * s805_dma_allocate_tr - Write s805 DMAC registers with start and end addresses of table descriptor list.
+ * Will return the next chunk to be treated if there are morre than %S805_DMA_MAX_DESC chunks in the list,
+ * otherwise %NULL will be returned.
+ *
+ * @thread_id: Id of the thread that will hold the transaction.
+ * @desc: First descriptor of the transaction.
+ * @frames: Amount of frames or chunks to be processed.
+ *
+ */
 static s805_dtable * s805_dma_allocate_tr (uint thread_id, s805_dtable * desc, uint frames) 
 {
 	
@@ -1853,17 +2007,21 @@ static s805_dtable * s805_dma_allocate_tr (uint thread_id, s805_dtable * desc, u
 	return amount < frames ? s805_dma_get_next_addr(desc) : NULL;
 }
 
-/* Protected by manager/general lock (serialized) */
+/**
+ * s805_dma_schedule_tr - Schedule an issued transaction. Channel lock held by callers.
+ *
+ * @c: The channel holding the list of issued descriptors.
+ *
+ */
 static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 
 	struct virt_dma_desc *vd, *tmp;
 	struct s805_desc * d;
 	
 #ifdef DEBUG
+	struct s805_desc * cursor;
 	s805_dtable *desc;
 	uint i = 0;
-	struct dma_async_tx_descriptor * cursor;
-	struct s805_desc * aux;
 #endif
 	
 	list_for_each_entry_safe (vd, tmp, &c->vc.desc_issued, node) {
@@ -1874,32 +2032,34 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 #ifdef DEBUG
 
 		/* Cyclic transfer, always the root here. */
-		cursor = &d->vd.tx;
+		cursor = d;
 
 		while (cursor) {
-			
-			aux = to_s805_dma_desc(cursor);
-			
-			list_for_each_entry (desc, &aux->desc_list, elem) {
 					
-				dev_dbg(d->c->vc.chan.device->dev, "0x%p %03u (0x%08X): ctrl = 0x%08X, src = 0x%08X, dst = 0x%08X, byte_cnt = %08u, src_burst = %05u, src_skip = %05u, dst_burst = %05u, dst_skip = %05u, crypto = 0x%08X\n",
-						&aux->vd.tx,
-						i,
-						desc->paddr,
-						desc->table->control, 
-						desc->table->src, 
-						desc->table->dst, 
-						desc->table->count,
-						desc->table->src_burst,
-						desc->table->src_skip,
-						desc->table->dst_burst,
-						desc->table->dst_skip,
-						desc->table->crypto);
-				i++;
+			list_for_each_entry (desc, &cursor->desc_list, elem) {
+
+				/* Last descriptors will be zeroed */
+				if (!list_is_last(&desc->elem, &cursor->desc_list)) {
+					
+					dev_dbg(d->c->vc.chan.device->dev, "0x%p %03u (0x%08X): ctrl = 0x%08X, src = 0x%08X, dst = 0x%08X, byte_cnt = %08u, src_burst = %05u, src_skip = %05u, dst_burst = %05u, dst_skip = %05u, crypto = 0x%08X\n",
+							&aux->vd.tx,
+							i,
+							desc->paddr,
+							desc->table->control, 
+							desc->table->src, 
+							desc->table->dst, 
+							desc->table->count,
+							desc->table->src_burst,
+							desc->table->src_skip,
+							desc->table->dst_burst,
+							desc->table->dst_skip,
+							desc->table->crypto);
+					i++;
+				}
 			}	
 			
-			/* If NULL, either this is not a cyclic transfer, or is the last descriptor of the chain. */
-			cursor = (cursor->next != cursor->parent) ? cursor->next : NULL;
+			/* If NULL, either this is not a cyclic transfer, or is the last descriptor of the chain (the last period). */
+			cursor = (cursor->next && (cursor->next != cursor->parent)) ? cursor->next : NULL;
 			
 			if (cursor)
 				dev_dbg(d->c->vc.chan.device->dev, "\t\t\t\t|--------------------------------------------------------------------------------------------|\n");
@@ -1930,7 +2090,13 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 	}
 }
 
-/* Fetch a new previously scheduled transaction. (Protected by mgr->lock)*/
+/**
+ * s805_dma_fetch_tr - Perform a batch of previously scheduled transactions, at least one if available, 
+ * at most %S805_DMA_MAX_HW_THREAD. General @mgr->lock held by callers.
+ *
+ * @ini_thread: Id of the first free thread.
+ *
+ */
 static void s805_dma_fetch_tr ( uint ini_thread ) {
 	
 	uint thread, thread_mask = 0;
@@ -2038,12 +2204,13 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 	}
 }
 
-/* 
-   Process, if existent, the next descriptor for a DMA channel
-   
-   @c: s805_chan to check for pending descriptors
-   
-*/
+/**
+ * s805_dma_process_next_desc - Schedule issued descriptors for a channel, and, if the driver is free, process them.
+ * Will return the status of the channel after the operation.
+ *
+ * @c: Channel holding the transactions to be performed.
+ *
+ */
 static s805_status s805_dma_process_next_desc ( struct s805_chan *c )
 {
 	
@@ -2071,7 +2238,13 @@ static s805_status s805_dma_process_next_desc ( struct s805_chan *c )
 	return c->status;
 }
 
-/* Process completed descriptors -- protected by mgr->busy */
+/**
+ * s805_dma_process_completed - Process a completed batch of descriptors, this function will be run in a tasklet
+ * scheduled by the ISR when all the pending transactions for a batch are finished.
+ *
+ * @null: Unused.
+ *
+ */
 static void s805_dma_process_completed ( unsigned long null )
 {
 	struct s805_desc * d, * temp;
@@ -2104,7 +2277,7 @@ static void s805_dma_process_completed ( unsigned long null )
 						
 						list_add_tail(&d->next->elem, &mgr->in_progress);
 							
-						/* Must always return 0 */
+						/* Must always return NULL */
 						s805_dma_allocate_tr (thread,
 											  list_first_entry(&d->next->desc_list, s805_dtable, elem),
 											  d->next->frames);
@@ -2175,14 +2348,16 @@ static void s805_dma_process_completed ( unsigned long null )
 	spin_unlock(&mgr->lock);
 }
 
-/* 
-   
-   IRQ callback function: All transactions must submit one IRQ when a batch of at most four chunks is finished, 
-   if needed a new chunk can be remaped for the same transaction, if the transaction is finished we will fetch 
-   a new transaction, if existent.
-   
-*/
-
+/**
+ * s805_dma_callback - ISR: All transactions must submit one IRQ when a batch of at most four chunks is finished, 
+ * Notice that if more than one transaction is scheduled in a batch we won't know which of them finished, so we 
+ * will move the first transaction in @mgr->in_progress to @mgr->completed, when the first of the latter lists is
+ * empty the tasklet in charge of process completion of a transaction will be scheduled, with high priority.
+ *
+ * @irq: IRQ number for our device (%S805_DMA_IRQ).
+ * @data: Pointer to @mgr.
+ *
+ */
 static irqreturn_t s805_dma_callback (int irq, void *data)
 {
 
@@ -2203,7 +2378,12 @@ static irqreturn_t s805_dma_callback (int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-/* Dismiss a previously scheduled descriptor -- protected by mgr->lock */
+/**
+ * s805_dma_dismiss_chann - Dismiss all scheduled transactions for a channel. Protected by @mgr->lock. 
+ *
+ * @c: Channel holding the transactions to be dismissed.
+ *
+ */
 static void s805_dma_dismiss_chann ( struct s805_chan * c ) {
 	
 	struct s805_desc * d, * tmp;
@@ -2218,6 +2398,12 @@ static void s805_dma_dismiss_chann ( struct s805_chan * c ) {
 	}
 }
 
+/**
+ * s805_dma_chan_wait_for_pending - Wait for a channel to finish its pending transactions. 
+ *
+ * @c: Channel to wait for.
+ *
+ */
 static s805_status s805_dma_chan_wait_for_pending (struct s805_chan * c) {
 
 	unsigned long now;
@@ -2239,7 +2425,12 @@ static s805_status s805_dma_chan_wait_for_pending (struct s805_chan * c) {
 	return alive ? S805_DMA_SUCCESS : S805_DMA_ERROR;
 }
 
-/* Dismiss a previously scheduled descriptor -- protected by mgr->lock */
+/**
+ * s805_dma_chan_terminate - Wait for a terminated channel to abort and finish its transactions. 
+ *
+ * @c: Channel to wait for.
+ *
+ */
 static s805_status s805_dma_chan_terminate ( struct s805_chan * c, s805_status init ) {
 	
 	s805_status status = S805_DMA_ERROR;
@@ -2259,14 +2450,14 @@ static s805_status s805_dma_chan_terminate ( struct s805_chan * c, s805_status i
 	return s805_dma_chan_wait_for_pending(c);
 }
 
-/*
-  Bypass function for device_control (dmaengine interface)
-  
-  @chan: channel to set up.
-  @cmd: command to perform.
-  @arg: pointer to a dma_slave_config struct, for DMA_SLAVE_CONFIG only.
-   
-*/
+/**
+ * s805_dma_control - Endpoint function for device_control (dmaengine interface).
+ *
+ * @chann: Channel to wait for.
+ * @cmd: Command to perform.
+ * @arg: Pointer to a dma_slave_config struct, for DMA_SLAVE_CONFIG only.
+ *
+ */
 static int s805_dma_control (struct dma_chan *chan, 
 							 enum dma_ctrl_cmd cmd,
 							 unsigned long arg) 
@@ -2331,7 +2522,7 @@ static int s805_dma_control (struct dma_chan *chan,
 			}
 		}
 	    break;;
-	case DMA_SLAVE_CONFIG: /* We need to perform this before dma_prep_slave_sg */
+	case DMA_SLAVE_CONFIG:
 		{
 			struct dma_slave_config *cfg = (struct dma_slave_config *) arg;
 			
@@ -2361,7 +2552,12 @@ static int s805_dma_control (struct dma_chan *chan,
 	return c->status;
 }
 
-
+/**
+ * get_residue - Auxiliar function to get the residue for a descriptor.
+ *
+ * @me: Descriptor to get the residue for.
+ *
+ */
 static u32 get_residue (struct s805_desc * me) {
 
 	struct s805_desc * cursor;
@@ -2374,7 +2570,7 @@ static u32 get_residue (struct s805_desc * me) {
 		cursor = me->next;
 		
 		/* Will count the prediods we are lacking till the end of the buffer. */
-		while (cursor != me) {
+		while (cursor != me->root) {
 		   		
 			list_for_each_entry_safe (desc, temp, &cursor->desc_list, elem)
 				residue += desc->table->count;
@@ -2397,6 +2593,16 @@ static u32 get_residue (struct s805_desc * me) {
   @txstate: output parameter, to be filled by the rutine.
 
 */
+
+/**
+ * s805_dma_tx_status - Endpoint function for dma_tx_status (dmaengine interface).
+ * Will return the status of the channel.
+ *
+ * @chann: Channel holding the transaction identified by @cookie.
+ * @cookie: Identifier of a transaction in a channel.
+ * @txstate: Struct to put the residue of the transaction. 
+ *
+ */
 enum dma_status s805_dma_tx_status(struct dma_chan *chan,
 								   dma_cookie_t cookie,
 								   struct dma_tx_state *txstate) 
@@ -2430,12 +2636,12 @@ enum dma_status s805_dma_tx_status(struct dma_chan *chan,
 	return ret;
 }
 
-/*
-  Bypass function for dma_issue_pending (dmaengine interface)
-  
-  @chan: channel to issue pending ops.
-
-*/
+/**
+ * s805_dma_issue_pending - Endpoint function for dma_issue_pending (dmaengine interface).
+ *
+ * @chann: Channel holding the transactions to be issued.
+ *
+ */
 static void s805_dma_issue_pending(struct dma_chan *chan)
 {
 	struct s805_chan *c = to_s805_dma_chan(chan);
@@ -2450,12 +2656,12 @@ static void s805_dma_issue_pending(struct dma_chan *chan)
 		spin_unlock(&c->vc.lock);
 }
 
-/*
-  Bypass function for free_chan_resources (dmaengine interface)
-  
-  @chan: channel to free resources for.
-
-*/
+/**
+ * s805_dma_free_chan_resources - Endpoint function for device_free_chan_resources (dmaengine interface).
+ *
+ * @chann: Channel to free resources for.
+ *
+ */
 static void s805_dma_free_chan_resources(struct dma_chan *chan)
 {
 	struct s805_chan *c = to_s805_dma_chan(chan);
@@ -2470,12 +2676,12 @@ static void s805_dma_free_chan_resources(struct dma_chan *chan)
 	dma_pool_destroy(c->pool);
 }
 
-/*
-  Bypass function for alloc_chan_resources (dmaengine interface)
-  
-  @chan: channel to allocate resources for.
-
-*/
+/**
+ * s805_dma_alloc_chan_resources - Endpoint function for device_alloc_chan_resources (dmaengine interface).
+ *
+ * @chann: Channel to allocate resources for.
+ *
+ */
 static int s805_dma_alloc_chan_resources(struct dma_chan *chan)
 {
 	struct s805_chan *c = to_s805_dma_chan(chan);
@@ -2500,24 +2706,34 @@ static int s805_dma_alloc_chan_resources(struct dma_chan *chan)
 	return 0;  
 }
 
-/* Allocate s805 channel structures */
-static int s805_dma_chan_init (struct s805_dmadev *d)
+/**
+ * s805_dma_chan_init - Probe an s805 DMAC dma channel.
+ *
+ * @m: General manager device.
+ *
+ */
+static int s805_dma_chan_init (struct s805_dmadev *m)
 {
 	struct s805_chan *c;
 	
-	c = devm_kzalloc(d->ddev.dev, sizeof(struct s805_chan), GFP_KERNEL);
+	c = devm_kzalloc(m->ddev.dev, sizeof(struct s805_chan), GFP_KERNEL);
 	if (!c)
 		return -ENOMEM;
 	
 	c->vc.desc_free = s805_dma_desc_free;
-	vchan_init(&c->vc, &d->ddev);
+	vchan_init(&c->vc, &m->ddev);
 	
 	c->status = S805_DMA_SUCCESS;
 	
 	return 0;
 }
 
-/* Allocation of the global structures that will hold DMA manager information */
+/**
+ * s805_dmamgr_probe - Allocate the global structures that will hold s805 DMAC manager information.
+ *
+ * @pdev: Platform device.
+ *
+ */
 static int s805_dmamgr_probe(struct platform_device *pdev)
 {	
 	mgr = devm_kzalloc(&pdev->dev, sizeof(struct s805_dmadev), GFP_KERNEL);
@@ -2552,7 +2768,12 @@ static int s805_dmamgr_probe(struct platform_device *pdev)
 }
 
 
-/* Free DMA s805 device REVISAR */
+/**
+ * s805_dma_free - Free s805 DMAC manager device.
+ *
+ * @m: General manager device.
+ *
+ */
 static void s805_dma_free(struct s805_dmadev *m)
 {
 	/* Check for active descriptors. */
@@ -2573,6 +2794,12 @@ static void s805_dma_free(struct s805_dmadev *m)
 	
 }
 
+/**
+ * get_chan_num_cmdline - Get the desired amount of dma channels from the kernel cmd line.
+ *
+ * @str: String for our option.
+ *
+ */
 static int get_chan_num_cmdline (char *str)
 {
 	
@@ -2584,7 +2811,12 @@ static int get_chan_num_cmdline (char *str)
 __setup("dma_channels=", get_chan_num_cmdline);
 
 
-/* Probe subsystem */
+/**
+ * s805_dma_probe - Probe subsystem.
+ *
+ * @pdev: Platform device.
+ *
+ */
 static int s805_dma_probe (struct platform_device *pdev)
 {
 	
@@ -2593,7 +2825,7 @@ static int s805_dma_probe (struct platform_device *pdev)
 	if (!pdev->dev.dma_mask)
 		pdev->dev.dma_mask = &pdev->dev.coherent_dma_mask;
 	
-	ret = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32)); //DMA_TX_TYPE_END
+	ret = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
 	
 	if (ret)
 		return ret;
@@ -2626,7 +2858,7 @@ static int s805_dma_probe (struct platform_device *pdev)
 	
 	/* 
 	   DMA_CAPABILITIES: All channels needs to be either private or public, we don't set the DMA_PRIVATE capabilitie 
-	   to make them all public so we can give support to the async_tx api and network or audi drivers. 
+	   to make them all public so we can give support to the async_tx api and network or audio drivers. 
 	*/
 
 	//dma_cap_set(DMA_PRIVATE, mgr->ddev.cap_mask);
@@ -2733,5 +2965,6 @@ module_exit(s805_exit);
 
 MODULE_ALIAS("platform:s805-dmaengine");
 MODULE_DESCRIPTION("Amlogic S805 dmaengine driver");
+/* Special thanks to Raspberry Pi developers, his work has been a massive help and inspiration! */
 MODULE_AUTHOR("szz-dvl");
 MODULE_LICENSE("GPL v2");

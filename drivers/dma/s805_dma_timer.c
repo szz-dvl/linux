@@ -18,6 +18,10 @@
 #define S805_DMA_RESET_REG            P_RESET1_REGISTER
 #define S805_DMA_RESET                BIT(9)
 
+/**
+ * s805_dma_hard_reset - Hardware reset.
+ *
+ */
 static inline void s805_dma_hard_reset ( void ) {
 
 	u32 status;
@@ -33,6 +37,13 @@ static inline void s805_dma_hard_reset ( void ) {
 	WR(status, S805_DMA_CTRL);	
 }
 
+/**
+ * s805_dma_reschedule_broken - Re-schedule transactions that where in @mgr->in_progress or @mgr->completed 
+ * in the moment of the timeout.
+ *
+ * @m: General manager device.
+ *
+ */
 static void s805_dma_reschedule_broken ( struct s805_dmadev *m ) {
 
 	struct s805_desc * d, * temp;
@@ -69,6 +80,13 @@ static void s805_dma_reschedule_broken ( struct s805_dmadev *m ) {
 
 }
 
+/**
+ * s805_dma_to_callback - ISR for timeout interrupts.
+ *
+ * @irq: IRQ number for our timer (%S805_DMA_TO_IRQ).
+ * @data: Pointer to the general manager.
+ *
+ */
 static irqreturn_t s805_dma_to_callback (int irq, void *data)
 {
 	struct s805_dmadev *m = data;
@@ -89,6 +107,10 @@ static irqreturn_t s805_dma_to_callback (int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+/**
+ * s805_dma_to_init - Initialise the timer (TIMER_A).
+ *
+ */
 int s805_dma_to_init ( void ) {
 
 	u32 status = RD(S805_DMA_TIMER_CTRL);
@@ -104,17 +126,28 @@ int s805_dma_to_init ( void ) {
 
 }
 
-
+/**
+ * s805_dma_to_shutdown - Shutdown the timer (TIMER_A).
+ *
+ */
 void s805_dma_to_shutdown ( void ) {
 
 	u32 status = RD(S805_DMA_TIMER_CTRL);
-		
+
+	mgr->timer_busy = false;
+	
 	WR(status & ~S805_DMA_TIMER_ENABLE, S805_DMA_TIMER_CTRL);
 
 	free_irq(S805_DMA_TO_IRQ, mgr);
 
 }
 
+/**
+ * s805_dma_to_start - Set and start a timeout.
+ *
+ * @ms: Milliseconds till timeout interrupt.
+ *
+ */
 void s805_dma_to_start ( u16 ms ) {
 
 	u32 status = RD(S805_DMA_TIMER_CTRL);
@@ -130,6 +163,12 @@ void s805_dma_to_start ( u16 ms ) {
 
 }
 
+/**
+ * s805_dma_to_stop - Stop a timeout. Notice that it is not possible for the hardware to forcedly stop the timer, 
+ * so we set the maximum available time, what will give us time enough to operate transparently, it is, as if no 
+ * timeout is configured till the next timeout is needed.
+ *
+ */
 void s805_dma_to_stop ( void ) {
 
 	u32 status = RD(S805_DMA_TIMER_CTRL);
