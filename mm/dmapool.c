@@ -42,13 +42,22 @@
 #define DMAPOOL_DEBUG 1
 #endif
 
+typedef enum {
+	
+	POOL_FREE_STATIC,
+	POOL_FREE_RESTORE,
+	POOL_FREE_NORESTORE
+	
+} dma_pool_free_t;
+
 struct dma_pool {		/* the pool */
 	struct list_head page_list;
 	spinlock_t lock;
 	size_t size;
 	struct device *dev;
 	size_t allocation;
-	size_t boundary;
+	size_t boundary;	
+	dma_pool_free_t type;
 	char name[32];
 	struct list_head pools;
 };
@@ -127,8 +136,8 @@ static DEVICE_ATTR(pools, S_IRUGO, show_pools, NULL);
  * addressing restrictions on individual DMA transfers, such as not crossing
  * boundaries of 4KBytes.
  */
-struct dma_pool *dma_pool_create(const char *name, struct device *dev,
-				 size_t size, size_t align, size_t boundary)
+struct dma_pool *__dma_pool_create(const char *name, struct device *dev,
+								   size_t size, size_t align, size_t boundary, dma_pool_free_t free_t)
 {
 	struct dma_pool *retval;
 	size_t allocation;
@@ -169,6 +178,7 @@ struct dma_pool *dma_pool_create(const char *name, struct device *dev,
 	retval->size = size;
 	retval->boundary = boundary;
 	retval->allocation = allocation;
+	retval->type = free_t;
 
 	if (dev) {
 		int ret;
@@ -191,13 +201,36 @@ struct dma_pool *dma_pool_create(const char *name, struct device *dev,
 
 	return retval;
 }
+
+struct dma_pool * dma_pool_create(const char *name, struct device *dev,
+					 size_t size, size_t align, size_t boundary) {
+
+	return __dma_pool_create(name, dev, size, align, boundary, POOL_FREE_STATIC);
+
+}
 EXPORT_SYMBOL(dma_pool_create);
+
+struct dma_pool * dma_pool_create_restore(const char *name, struct device *dev,
+							 size_t size, size_t align, size_t boundary) {
+	
+	return __dma_pool_create(name, dev, size, align, boundary, POOL_FREE_RESTORE);
+
+}
+EXPORT_SYMBOL(dma_pool_create_restore);
+
+struct dma_pool * dma_pool_create_norestore(const char *name, struct device *dev,
+							   size_t size, size_t align, size_t boundary) {
+
+	return __dma_pool_create(name, dev, size, align, boundary, POOL_FREE_NORESTORE);
+
+}
+EXPORT_SYMBOL(dma_pool_create_norestore);
 
 static void pool_initialise_page(struct dma_pool *pool, struct dma_page *page)
 {
 	unsigned int offset = 0;
 	unsigned int next_boundary = pool->boundary;
-
+	
 	do {
 		unsigned int next = offset + pool->size;
 		if (unlikely((next + pool->size) >= next_boundary)) {
@@ -308,7 +341,7 @@ void *dma_pool_alloc(struct dma_pool *pool, gfp_t mem_flags,
 	void *retval;
 
 	might_sleep_if(mem_flags & __GFP_WAIT);
-
+	
 	spin_lock_irqsave(&pool->lock, flags);
 	list_for_each_entry(page, &pool->page_list, page_list) {
 		if (page->offset < pool->allocation)
@@ -376,6 +409,23 @@ static struct dma_page *pool_find_page(struct dma_pool *pool, dma_addr_t dma)
 	return NULL;
 }
 
+
+static unsigned int dma_pool_get_restore_offset (struct dma_pool *pool, struct dma_page *page) {
+
+	/* 
+	   This may be dangerous if values stored in the pool blocks have the chance to match any offset value, it is, if the first 4 bytes of any block 
+	   have the chance to be a multiple of pool->size and are between pool->size and pool->allocation. If this is the case dma_pool_create_norestore can be used.
+	*/
+	
+	int offset = page->offset;
+	uint bsize = pool->size;
+	
+	while ( offset == ((*(int *)(page->vaddr + offset)) - bsize) )
+		offset -= bsize;
+	
+	return offset >= 0 ? offset + bsize : 0;
+}
+
 /**
  * dma_pool_free - put block back into dma pool
  * @pool: the dma pool holding the block
@@ -440,10 +490,32 @@ void dma_pool_free(struct dma_pool *pool, void *vaddr, dma_addr_t dma)
 	}
 	memset(vaddr, POOL_POISON_FREED, pool->size);
 #endif
-
+	
 	page->in_use--;
-	*(int *)vaddr = page->offset;
-	page->offset = offset;
+	
+	switch (pool->type) {
+	case POOL_FREE_STATIC:
+		{
+			*(int *)vaddr = page->offset;
+			page->offset = offset;
+		}
+		break;
+	case POOL_FREE_RESTORE:
+		{
+			*(int *)vaddr = offset + pool->size;
+			page->offset = is_page_busy(page) ? dma_pool_get_restore_offset (pool, page) : 0;
+		}
+		break;
+	case POOL_FREE_NORESTORE:
+		{
+			*(int *)vaddr = offset + pool->size;
+			
+			if (!is_page_busy(page))
+				page->offset = 0;
+		}
+		break;
+	}
+	
 	/*
 	 * Resist a temptation to do
 	 *    if (!is_page_busy(page)) pool_free_page(pool, page);

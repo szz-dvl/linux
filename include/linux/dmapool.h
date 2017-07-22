@@ -17,6 +17,12 @@
 struct dma_pool *dma_pool_create(const char *name, struct device *dev, 
 			size_t size, size_t align, size_t allocation);
 
+struct dma_pool *dma_pool_create_restore(const char *name, struct device *dev, 
+			size_t size, size_t align, size_t allocation);
+
+struct dma_pool *dma_pool_create_norestore(const char *name, struct device *dev, 
+			size_t size, size_t align, size_t allocation);
+
 void dma_pool_destroy(struct dma_pool *pool);
 
 void *dma_pool_alloc(struct dma_pool *pool, gfp_t mem_flags,

@@ -249,20 +249,25 @@ static int s805_crc_hash_final (struct ahash_request *req) {
 	struct s805_crc_reqctx *ctx = ahash_request_ctx(req);
 
 	if (!ctx->initialized) {
-
+		
 		dev_err(crc_mgr->dev, "%s: Uninitialized request.\n", __func__);
 		return -ENOSYS;
-
+		
 	}
 
 	if (ctx->finalized) {
-
+		
 		dev_err(crc_mgr->dev, "%s: Already finalized request.\n", __func__);
 		return -EINVAL;
 		
 	}
 	
-	s805_close_desc (ctx->tx_desc);
+	if (!s805_close_desc (ctx->tx_desc)) {
+		
+		dev_err(crc_mgr->dev, "%s: Failed to close descriptor.\n", __func__);
+		return -ENOSYS;
+		
+	}
 	
     spin_lock(&crc_mgr->lock);
 	list_add_tail(&ctx->elem, &crc_mgr->jobs);

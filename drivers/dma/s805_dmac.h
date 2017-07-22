@@ -17,6 +17,8 @@
 #define S805_DMA_TIME_OUT                150  /* Used in terminate channel and channel release, for busy waiting a channel to free its pending transactions. */
 #endif
 
+#define S805_DMA_MAX_HW_THREAD           4
+
 #define __S805_DMAC
 
 struct s805_dmadev 
@@ -40,7 +42,9 @@ struct s805_dmadev
 	
 	struct tasklet_struct tasklet_completed;  /* Tasklet for bh processing of interrupts. */
 
-	bool busy_2d;  
+#ifdef CONFIG_S805_DMAC_TO
+	bool timer_busy;
+#endif
 	bool cyclic_busy;
 	bool busy;
 };
@@ -90,10 +94,11 @@ struct s805_desc {
 	struct memset_info * memset;
 
 	/* For transactions with more than S805_DMA_MAX_DESC data chunks. */
-	s805_dtable * next;
+	s805_dtable * next_chunk;
 
-	/* 2D mode, meant to detect 2D transactions to serialize them */
-	bool xfer_2d;
+	/* For cyclic transfers */
+	struct s805_desc * next;
+	struct s805_desc * root;
 	
 };
 

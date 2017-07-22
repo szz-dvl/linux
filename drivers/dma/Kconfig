@@ -39,8 +39,6 @@ config S805_DMAC
 	depends on GENERIC_HARDIRQS
 	select DMA_ENGINE
 	select DMA_VIRTUAL_CHANNELS
-	select ASYNC_TX_DMA
-	select ASYNC_TX_ENABLE_CHANNEL_SWITCH
 	default y if MACH_MESON8B_ODROIDC
 	help
 	  This adds support for the Amlogic s805 Direct Memory Access Controller,
@@ -54,35 +52,6 @@ config S805_DMAC
 
 	  If usure say N.
 
-config S805_DMAC_TO
-	   bool "Time out for transactions."
-	   depends on S805_DMAC
-	   default n
-	   help
-			Cyclic transfers may generate a large amount of interrupts, and at
-			the same time, may be heavy for the hardware, leaving it in a perpetual
-			stalled state. Besides, if more than one parallel transaction is running
-			at a time we may face hardware crashes with the same result.
-			
-			This option will enable a timeout for this situation to be treated properly
-			in case of failure. As a pro we can guarantee that hardware hangs or crashes
-			will be properly handled, in the other hand, if the time out value provided
-			is not big enough big transactions may be timed out while the transaction is
-			rightfully unfinished. After some testing, a value of 500 ms have been proved
-			to support transfers up to ~145MB of lenght. 
-			
-			If selected, TIMER_A will be used to generate the time out interrupts.
-			
-			Say Y if you are experiencing hardware crahes when cyclic transactions
-			are configured, or more than one transaction is running at a time,
-			othrewise say N.
-			
-config S805_DMAC_TO_VAL
-	   int "Provide timeout value (in milliseconds) for cyclic transfers."
-	   depends on S805_DMAC_TO 
-	   range 10 5000
-	   default 500
-	   		
 config S805_DMAC_SERIALIZE
 	   bool "Serialize transactions."
 	   depends on S805_DMAC
@@ -102,7 +71,37 @@ config S805_DMAC_SERIALIZE
 			are detected.
 			
 			Say Y if you are experiencing hardware crahes when more than one transaction runs
-			at a time, othrewise say N. 
+			at a time, othrewise say N.
+			
+config S805_DMAC_TO
+	   bool "Time out for transactions."
+	   depends on S805_DMAC
+	   default y if !S805_DMAC_SERIALIZE
+	   help
+			Cyclic transfers may generate a large amount of interrupts, and at
+			the same time, may be heavy for the hardware, leaving it in a perpetual
+			stalled state. Besides, if more than one parallel transaction is running
+			at a time we may face hardware crashes with the same result.
+			
+			This option will enable a timeout for this situation to be treated properly
+			in case of failure. As a pro we can guarantee that hardware hangs or crashes
+			will be properly handled, in the other hand, if the time out value provided
+			is not large enough big transactions may be timed out while the transaction is
+			rightfully unfinished. After some testing, a value of 500 ms have been proved
+			to support transfers up to ~145MB of lenght. For cyclic transfers the time out
+			will apply for each period.
+			
+			If selected, TIMER_A will be used to generate the time out interrupts.
+			
+			Say Y if you are experiencing hardware crahes when cyclic transactions
+			are configured, or more than one transaction is running at a time,
+			othrewise say N.
+			
+config S805_DMAC_TO_VAL
+	   int "Provide timeout value (in milliseconds)."
+	   depends on S805_DMAC_TO 
+	   range 10 5000
+	   default 300
 			
 config INTEL_MID_DMAC
 	tristate "Intel MID DMA support for Peripheral DMA controllers"

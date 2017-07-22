@@ -17,7 +17,7 @@
 #define S805_DMA_RESET_CNT            CBUS_REG_ADDR(0x2271)
 #define S805_DMA_RESET_REG            P_RESET1_REGISTER
 #define S805_DMA_RESET                BIT(9)
-	
+
 static inline void s805_dma_hard_reset ( void ) {
 
 	u32 status;
@@ -30,49 +30,49 @@ static inline void s805_dma_hard_reset ( void ) {
 	status &= ~S805_DMA_DMA_PM;
 	status |= S805_DMA_ENABLE;
 	
-	WR(status, S805_DMA_CTRL);
-	
+	WR(status, S805_DMA_CTRL);	
 }
 
 static void s805_dma_reschedule_broken ( struct s805_dmadev *m ) {
 
 	struct s805_desc * d, * temp;
 	LIST_HEAD(head);
-
+	
 	list_splice_tail_init(&m->completed, &head);
 	list_splice_tail_init(&m->in_progress, &head);
 	
 	list_for_each_entry_safe(d, temp, &head, elem) {
 		
-		if (d->vd.tx.next)
+		if (d->next) {
+
+			spin_lock(&m->lock);
+			list_move_tail(&d->elem, &m->scheduled); /* Pospose cyclic transfer, at least, till failed non cyclic transfers are finished. */
+			spin_unlock(&m->lock);
+		   		    
+			m->cyclic_busy = false;
 			
-			list_move_tail(&d->elem, &m->completed); /* Cyclic transfer */
-		
-		else {
-			
+		}  else {
+
 			spin_lock(&m->lock);
 			list_move(&d->elem, &m->scheduled); /* Re-schedule transactions that where in the batch in the moment of the time-out, giving them preference (in the head of the queue) */
 			spin_unlock(&m->lock);
+
+#ifndef CONFIG_S805_DMAC_SERIALIZE
+			m->thread_reset ++;
+#endif
 		}
-		
-/* #ifndef CONFIG_S805_DMAC_SERIALIZE */
-/* 		m->thread_reset ++; */
-/* #endif */
-		
 	}
 	
 #ifndef CONFIG_S805_DMAC_SERIALIZE
-	m->max_thread = 1; /* Force serialization for the same amount of descriptors that failed. */
-	m->thread_reset ++;
+	m->max_thread = 1; /* Force serialization for non cyclic descriptors that failed. */
 #endif
-
-	m->busy = false;
 
 }
 
 static irqreturn_t s805_dma_to_callback (int irq, void *data)
 {
 	struct s805_dmadev *m = data;
+	m->timer_busy = false;
 	
 	if (m->busy) {
 		
@@ -81,7 +81,7 @@ static irqreturn_t s805_dma_to_callback (int irq, void *data)
 		s805_dma_hard_reset();
 		
 		s805_dma_reschedule_broken(m);
-		tasklet_hi_schedule(&m->tasklet_completed);
+		tasklet_hi_schedule(&m->tasklet_completed); /* Bypass to "s805_dma_fetch_tr", no descriptor will be found in m->completed */
 		
 	} else
 	    dev_info(m->ddev.dev,"Timeout interrupt: Bye Bye.\n");
@@ -97,6 +97,8 @@ int s805_dma_to_init ( void ) {
 	status |= S805_DMA_TIMER_RES(S805_DMA_TIMER_RES_1ms);
 		
 	WR(status, S805_DMA_TIMER_CTRL);
+
+	dev_info(mgr->ddev.dev,"Enabling s805 DMA engine timeout: %u ms.\n", S805_DMA_TIME_OUT);
 
 	return request_irq(S805_DMA_TO_IRQ, s805_dma_to_callback, IRQF_TIMER, "s805_dmaengine_to_irq", mgr);
 
@@ -116,11 +118,14 @@ void s805_dma_to_shutdown ( void ) {
 void s805_dma_to_start ( u16 ms ) {
 
 	u32 status = RD(S805_DMA_TIMER_CTRL);
+
+	if (!mgr->timer_busy)
+		mgr->timer_busy = true;
 	
 	WR(status & ~S805_DMA_TIMER_ENABLE, S805_DMA_TIMER_CTRL);
 	
 	WR(S805_DMA_TIMER_VAL(ms), S805_DMA_TIMER_CFG);
-
+	
 	WR(status | S805_DMA_TIMER_ENABLE, S805_DMA_TIMER_CTRL);
 
 }

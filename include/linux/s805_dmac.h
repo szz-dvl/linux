@@ -54,11 +54,11 @@ struct s805_desc {
 	struct memset_info * memset;
 
 	/* For transactions with more than S805_DMA_MAX_DESC data chunks. */
-	s805_dtable * next;
+	s805_dtable * next_chunk;
 
-	/* 2D mode, meant to detect 2D transactions to serialize them */
-	bool xfer_2d;
-	
+	/* For cyclic transfers */
+	struct s805_desc * next;
+	struct s805_desc * root;	
 };
 
 #endif
@@ -180,7 +180,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 												   struct dma_async_tx_descriptor * tx_desc,
 												   bool last);
 
-void s805_close_desc (struct dma_async_tx_descriptor * tx_desc);     /* CRC  */
+bool s805_close_desc (struct dma_async_tx_descriptor * tx_desc);     /* CRC  */
 
 s805_dtable * sg_aes_move_along (s805_dtable * cursor, s805_init_desc * init_nfo);
 s805_dtable * sg_tdes_move_along (s805_dtable * cursor, s805_init_desc * init_nfo);
