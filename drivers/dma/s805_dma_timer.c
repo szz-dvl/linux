@@ -120,7 +120,7 @@ int s805_dma_to_init ( void ) {
 		
 	WR(status, S805_DMA_TIMER_CTRL);
 
-	dev_info(mgr->ddev.dev,"Enabling s805 DMA engine timeout: %u ms.\n", S805_DMA_TIME_OUT);
+	dev_info(mgr->ddev.dev,"Enabling s805 DMA engine timeout: %u ms, IRQ: %u.\n", S805_DMA_TIME_OUT, S805_DMA_TO_IRQ);
 
 	return request_irq(S805_DMA_TO_IRQ, s805_dma_to_callback, IRQF_TIMER, "s805_dmaengine_to_irq", mgr);
 

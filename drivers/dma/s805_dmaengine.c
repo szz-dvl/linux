@@ -2091,7 +2091,7 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 }
 
 /**
- * s805_dma_fetch_tr - Perform a batch of previously scheduled transactions, at least one if available, 
+ * s805_dma_fetch_tr - Perform a batch of previously scheduled transactions, zero if none is available, 
  * at most %S805_DMA_MAX_HW_THREAD. General @mgr->lock held by callers.
  *
  * @ini_thread: Id of the first free thread.
@@ -2452,6 +2452,7 @@ static s805_status s805_dma_chan_terminate ( struct s805_chan * c, s805_status i
 
 /**
  * s805_dma_control - Endpoint function for device_control (dmaengine interface).
+ * The status of the channel after the operation will be returned.
  *
  * @chann: Channel to wait for.
  * @cmd: Command to perform.
@@ -2584,15 +2585,6 @@ static u32 get_residue (struct s805_desc * me) {
 	
 	return residue;
 }
-
-/*
-  Bypass function for dma_tx_status (dmaengine interface)
-  
-  @chan: channel holding the information for the transaction.
-  @cookie: cookie identifier of the transaction
-  @txstate: output parameter, to be filled by the rutine.
-
-*/
 
 /**
  * s805_dma_tx_status - Endpoint function for dma_tx_status (dmaengine interface).
@@ -2965,6 +2957,5 @@ module_exit(s805_exit);
 
 MODULE_ALIAS("platform:s805-dmaengine");
 MODULE_DESCRIPTION("Amlogic S805 dmaengine driver");
-/* Special thanks to Raspberry Pi developers, his work has been a massive help and inspiration! */
 MODULE_AUTHOR("szz-dvl");
 MODULE_LICENSE("GPL v2");
