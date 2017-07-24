@@ -217,7 +217,9 @@ static inline dma_addr_t sg_phys(struct scatterlist *sg)
  **/
 static inline void *sg_virt(struct scatterlist *sg)
 {
-	return page_address(sg_page(sg)) + sg->offset;
+	void * addr = page_address(sg_page(sg));
+		
+	return addr ? addr + sg->offset : page_to_virt(sg_page(sg)) + sg->offset;
 }
 
 int sg_nents(struct scatterlist *sg);

@@ -231,6 +231,9 @@ static inline void *phys_to_virt(phys_addr_t x)
 #define __va(x)			((void *)__phys_to_virt((unsigned long)(x)))
 #define pfn_to_kaddr(pfn)	__va((pfn) << PAGE_SHIFT)
 
+#define pfn_to_virt(pfn)	pfn_to_kaddr(pfn)
+#define page_to_virt(page)	pfn_to_virt(page_to_pfn(page))
+
 /*
  * Virtual <-> DMA view memory address translations
  * Again, these are *only* valid on the kernel direct mapped RAM

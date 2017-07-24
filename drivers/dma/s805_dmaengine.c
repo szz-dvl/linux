@@ -2042,7 +2042,7 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 				if (!list_is_last(&desc->elem, &cursor->desc_list)) {
 					
 					dev_dbg(d->c->vc.chan.device->dev, "0x%p %03u (0x%08X): ctrl = 0x%08X, src = 0x%08X, dst = 0x%08X, byte_cnt = %08u, src_burst = %05u, src_skip = %05u, dst_burst = %05u, dst_skip = %05u, crypto = 0x%08X\n",
-							&aux->vd.tx,
+							&cursor->vd.tx,
 							i,
 							desc->paddr,
 							desc->table->control, 
@@ -2059,7 +2059,7 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 			}	
 			
 			/* If NULL, either this is not a cyclic transfer, or is the last descriptor of the chain (the last period). */
-			cursor = (cursor->next && (cursor->next != cursor->parent)) ? cursor->next : NULL;
+			cursor = (cursor->next && (cursor->next != cursor->root)) ? cursor->next : NULL;
 			
 			if (cursor)
 				dev_dbg(d->c->vc.chan.device->dev, "\t\t\t\t|--------------------------------------------------------------------------------------------|\n");

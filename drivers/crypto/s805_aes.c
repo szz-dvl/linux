@@ -377,8 +377,6 @@ static int s805_aes_crypt_prep (struct ablkcipher_request *req, s805_aes_mode mo
 	
 	rctx->tx_desc->callback = (void *) &s805_aes_crypt_handle_completion;
 	rctx->tx_desc->callback_param = (void *) req;
-
-	req->base.data = req->dst; /* To easily recover the result from completion callback. */
 	
 	return s805_aes_crypt_schedule_job (req);
 }
@@ -421,7 +419,7 @@ static int s805_aes_ctr_decrypt(struct ablkcipher_request *req) {
 
 static struct crypto_alg s805_aes_algs[] = {
 {
-	.cra_name		    = "ecb(aes)",
+	.cra_name		    = "ecb(aes)-hw",
 	.cra_driver_name	= "s805-ecb-aes",
 	.cra_priority		= 100,
 	.cra_flags		    = CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC,
@@ -444,7 +442,7 @@ static struct crypto_alg s805_aes_algs[] = {
 	}
 },
 {
-	.cra_name		    = "cbc(aes)",
+	.cra_name		    = "cbc(aes)-hw",
 	.cra_driver_name	= "s805-cbc-aes",
 	.cra_priority		= 100,
 	.cra_flags		    = CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC,
@@ -467,7 +465,7 @@ static struct crypto_alg s805_aes_algs[] = {
 	}
 },
 {
-	.cra_name		    = "ctr(aes)",
+	.cra_name		    = "ctr(aes)-hw",
 	.cra_driver_name	= "s805-ctr-aes",
 	.cra_priority		= 100,
 	.cra_flags		    = CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC,

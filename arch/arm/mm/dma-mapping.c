@@ -501,8 +501,6 @@ static void *__alloc_from_pool(size_t size, struct page **ret_page)
 		WARN(1, "coherent pool not initialised!\n");
 		return NULL;
 	}
-
-    //pr_info("Inside: __alloc_from_pool: %u\n", size); SANTI
 	
 	/*
 	 * Align the region allocation - allocations from pool are rather
@@ -517,7 +515,7 @@ static void *__alloc_from_pool(size_t size, struct page **ret_page)
 	if (pageno < pool->nr_pages) {
 		bitmap_set(pool->bitmap, pageno, count);
 		ptr = pool->vaddr + PAGE_SIZE * pageno;
-		*ret_page = pool->pages[pageno];
+		*ret_page = pool->pages[pageno];		
 	} else {
 		pr_err_once("ERROR: %u KiB atomic DMA coherent pool is too small!\n"
 			    "Please increase it with coherent_pool= kernel parameter!\n",
@@ -574,8 +572,6 @@ static void *__alloc_from_contiguous(struct device *dev, size_t size,
 	size_t count = size >> PAGE_SHIFT;
 	struct page *page;
 	void *ptr;
-
-    //pr_info("Inside: __alloc_from_contiguous: %u\n", size); SANTI
 	
 	page = dma_alloc_from_contiguous(dev, count, order);
 	if (!page)
