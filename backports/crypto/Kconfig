@@ -1,4 +1,3 @@
-
 #Cryptographic API Configuration
 
 menuconfig BACKPORT_CRYPTO
@@ -8,7 +7,7 @@ menuconfig BACKPORT_CRYPTO
 	  This option provides the core Cryptographic API (4.12.y).
 
 if BACKPORT_CRYPTO
-
+		
 config CRYPTO_ACOMP2
 	tristate
 	select CRYPTO_ALGAPI2

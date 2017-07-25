@@ -71,6 +71,32 @@ struct s805_desc {
 #define S805_DTBL_SRC_HOLD               BIT(26) 
 #define S805_DTBL_DST_HOLD               BIT(25)
 
+typedef enum s805_dma_status {
+	S805_DMA_SUCCESS,
+	S805_DMA_IN_PROGRESS,
+	S805_DMA_PAUSED,
+	S805_DMA_ERROR,
+	S805_DMA_TERMINATED
+} s805_status;
+
+typedef struct s805_chan {
+	
+	struct virt_dma_chan vc;
+
+	/* Channel configuration, needed for slave_sg and cyclic transfers. */
+	struct dma_slave_config cfg;
+
+	/* Status of the channel either DMA_PAUSE ,DMA_IN_PROGRESS, DMA_SUCCESS or DMA_TERMINATED if terminated channel. */
+    s805_status status;        	
+
+	/* DMA pool. */
+	struct dma_pool *pool;
+
+	/* Pending transactions for the channel */
+	int pending;
+	
+} s805_chan;
+
 /* S805 Datasheet p.58 */
 typedef enum inline_types {
 	INLINE_NORMAL,
@@ -124,32 +150,6 @@ typedef enum tdes_mode {
     TDES_MODE_CBC
 } s805_tdes_mode;
 
-typedef enum s805_dma_status {
-	S805_DMA_SUCCESS,
-	S805_DMA_IN_PROGRESS,
-	S805_DMA_PAUSED,
-	S805_DMA_ERROR,
-	S805_DMA_TERMINATED
-} s805_status;
-
-typedef struct s805_chan {
-	
-	struct virt_dma_chan vc;
-
-	/* Channel configuration, needed for slave_sg and cyclic transfers. */
-	struct dma_slave_config cfg;
-
-	/* Status of the channel either DMA_PAUSE ,DMA_IN_PROGRESS, DMA_SUCCESS or DMA_TERMINATED if terminated channel. */
-    s805_status status;        	
-
-	/* DMA pool. */
-	struct dma_pool *pool;
-
-	/* Pending transactions for the channel */
-	int pending;
-	
-} s805_chan;
-
 typedef struct aes_init_descriptor {
 
 	s805_aes_key_type type;
@@ -180,9 +180,21 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 												   struct dma_async_tx_descriptor * tx_desc,
 												   bool last);
 
-bool s805_close_desc (struct dma_async_tx_descriptor * tx_desc);     /* CRC  */
+bool s805_close_desc (struct dma_async_tx_descriptor * tx_desc); /* CRC  */
+void s805_desc_early_free (struct dma_async_tx_descriptor * tx_desc);
 
+#ifdef CONFIG_CRYPTO_DEV_S805_AES
 s805_dtable * sg_aes_move_along (s805_dtable * cursor, s805_init_desc * init_nfo);
+#endif
+
+#ifdef CONFIG_CRYPTO_DEV_S805_TDES
 s805_dtable * sg_tdes_move_along (s805_dtable * cursor, s805_init_desc * init_nfo);
+#endif
+
+#ifdef CONFIG_CRYPTO_DEV_S805_CRC
 s805_dtable * sg_crc_move_along (s805_dtable * cursor, s805_init_desc * init_nfo);
+#endif
+
+#ifdef CONFIG_CRYPTO_DEV_S805_DIVX
 s805_dtable * sg_divx_move_along (s805_dtable * cursor, s805_init_desc * init_nfo);
+#endif

@@ -307,20 +307,42 @@ static s805_dtable * sg_init_desc (s805_dtable * chunk, s805_init_desc * init_nf
 	switch(init_nfo->type) {
 	case BLKMV_DESC:
 		return sg_move_along (chunk, init_nfo->d);
+#ifdef CONFIG_CRYPTO_DEV_S805_AES
 	case AES_DESC:
 		return sg_aes_move_along (chunk, init_nfo);
+#endif
+#ifdef CONFIG_CRYPTO_DEV_S805_TDES
 	case TDES_DESC:
 		return sg_tdes_move_along (chunk, init_nfo);
+#endif
+#ifdef CONFIG_CRYPTO_DEV_S805_CRC
 	case CRC_DESC:
 		return sg_crc_move_along (chunk, init_nfo);
+#endif
+#ifdef CONFIG_CRYPTO_DEV_S805_DIVX
 	case DIVX_DESC:
 		return sg_divx_move_along (chunk, init_nfo);
+#endif
 	default:
 		return NULL;
 	}
 }
 
 /* Public functions, for crypto modules */
+
+static void s805_dma_desc_free(struct virt_dma_desc *vd);
+
+/**
+ * s805_desc_early_free - Public funtion offered to crypto modules through "linux/s805_dmac.h", 
+ * meant to "early" free a failed descriptor.
+ *
+ * @tx_desc: The descriptor to be closed.
+ *
+ */
+void s805_desc_early_free (struct dma_async_tx_descriptor * tx_desc) {
+
+    s805_dma_desc_free(&to_s805_dma_desc(tx_desc)->vd);
+}
 
 /**
  * s805_close_desc - Public funtion offered to crypto modules through "linux/s805_dmac.h", 
@@ -331,9 +353,7 @@ static s805_dtable * sg_init_desc (s805_dtable * chunk, s805_init_desc * init_nf
  */
 bool s805_close_desc (struct dma_async_tx_descriptor * tx_desc) {
 
-	struct s805_desc *d = to_s805_dma_desc(tx_desc);
-
-	return add_zeroed_tdesc(d);
+	return add_zeroed_tdesc(to_s805_dma_desc(tx_desc));
 }
 
 /**

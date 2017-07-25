@@ -48,8 +48,7 @@ config CRYPTO_DEV_S805_CRC
 
 config CRYPTO_DEV_S805_DIVX
 	tristate "Amlogic s805 DMAC driver for DivX algorithm."
-	depends on S805_DMAC
-	depends on CRYPTO_ACOMP2
+	depends on S805_DMAC && CRYPTO_ACOMP2
 	default y if S805_DMAC && CRYPTO_ACOMP2
 	help
 	  This option will add support for s805 Amlogic DivX crypto engine,
