@@ -35,8 +35,6 @@ struct s805_aes_mgr {
     struct s805_chan * chan;
 	struct list_head jobs;
 	spinlock_t lock;
-
-	struct tasklet_struct tasklet_broken;
 	
 	bool busy;
 };
@@ -172,7 +170,6 @@ static int s805_aes_iv_gen (struct skcipher_givcrypt_request * req, s805_aes_mod
 	   
 	*/
 
-	u32 * aux;
 	uint i, sum = 0;
 	unsigned int ivsize = crypto_ablkcipher_ivsize(crypto_ablkcipher_reqtfm(&req->creq));
 	
@@ -192,8 +189,14 @@ static int s805_aes_iv_gen (struct skcipher_givcrypt_request * req, s805_aes_mod
 		else /* CTR */
 			s805_aes_seqiv_gen(req, ivsize);
 	} 
-	    
-	aux = (u32 *) req->giv;
+	
+	return 0;
+	
+}
+
+static inline void s805_aes_cpyiv_to_hw (struct skcipher_givcrypt_request * req /* ,rctx->mode, rctx->dir */) {
+
+	u32 * aux = (u32 *) req->giv;
 	
 	/* WR(cpu_to_be32(aux[0]), S805_AES_IV_3); */
 	/* WR(cpu_to_be32(aux[1]), S805_AES_IV_2); */
@@ -205,9 +208,7 @@ static int s805_aes_iv_gen (struct skcipher_givcrypt_request * req, s805_aes_mod
 	WR(aux[1], S805_AES_IV_1);
 	WR(aux[2], S805_AES_IV_2);
 	WR(aux[3], S805_AES_IV_3);
-	
-	return 0;
-	
+
 }
 
 static inline void s805_aes_cpykey_to_hw (const u32 * key, unsigned int keylen) {
@@ -265,7 +266,6 @@ static int s805_aes_crypt_launch_job (struct ablkcipher_request *req, bool chain
 	struct s805_aes_ctx *ctx = crypto_ablkcipher_ctx(crypto_ablkcipher_reqtfm(req));
 	struct s805_aes_reqctx *rctx = ablkcipher_request_ctx(req);
 	dma_cookie_t tx_cookie;
-	int ret;
 	
 	spin_lock(&aes_mgr->lock);
 	if (!aes_mgr->busy || chain) {
@@ -274,19 +274,8 @@ static int s805_aes_crypt_launch_job (struct ablkcipher_request *req, bool chain
 	
 		s805_aes_cpykey_to_hw ((const u32 *) ctx->key, ctx->keylen);
 
-		if (rctx->mode) {
-
-			ret = s805_aes_iv_gen (skcipher_givcrypt_cast(&req->base), rctx->mode /* rctx->dir */);
-		
-			if (ret) {
-				
-				list_del(&rctx->elem);
-				s805_desc_early_free(rctx->tx_desc);
-				tasklet_schedule(&aes_mgr->tasklet_broken);
-				return ret;
-			
-			}
-		}
+		if (rctx->mode)
+		    s805_aes_cpyiv_to_hw(skcipher_givcrypt_cast(&req->base) /* ,rctx->mode, rctx->dir */);
 		
 		tx_cookie = dmaengine_submit(rctx->tx_desc);
 		
@@ -305,19 +294,6 @@ static int s805_aes_crypt_launch_job (struct ablkcipher_request *req, bool chain
 	
 	return 1;
 	
-}
-
-static void s805_aes_relaunch_queue ( unsigned long null ) {
-
-	struct s805_aes_reqctx *job = list_first_entry_or_null (&aes_mgr->jobs, struct s805_aes_reqctx, elem);
-
-	if (job)  
-		s805_aes_crypt_launch_job(to_ablkcipher_request(job), true);
-	else {
-		spin_lock(&aes_mgr->lock);
-		aes_mgr->busy = false;
-		spin_unlock(&aes_mgr->lock);
-	}
 }
 
 static void s805_aes_crypt_handle_completion (void * req_ptr) {
@@ -384,7 +360,16 @@ static int s805_aes_crypt_prep (struct ablkcipher_request * req, s805_aes_mode m
 	struct scatterlist * aux;
 	s805_init_desc * init_nfo;
 	int keytype;
-	int len, j = 0;
+	int len, ret, j = 0;
+
+	if (mode) {
+
+		ret = s805_aes_iv_gen (skcipher_givcrypt_cast(&req->base), mode /* dir */);
+		
+		if (ret) 
+			return ret;
+			
+	}
 	
 	/* Allocate and setup the information for descriptor initialization */
 	init_nfo = kzalloc(sizeof(s805_init_desc), GFP_NOWAIT); /* May we do this with GFP_KERNEL?? */
@@ -587,7 +572,6 @@ static int s805_aes_probe(struct platform_device *pdev)
 	}
 
     aes_mgr->dev = &pdev->dev;
-	aes_mgr->tasklet_broken = (struct tasklet_struct) { NULL, 0, ATOMIC_INIT(0), s805_aes_relaunch_queue, 0 };
 	
 	INIT_LIST_HEAD(&aes_mgr->jobs);
 	spin_lock_init(&aes_mgr->lock);
