@@ -463,7 +463,8 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 			/* ICG will be cleared if no burst present.*/
 			if (!desc_tbl->table->src_burst) {
 				
-				if (burst <= S805_DMA_MAX_BURST && burst == desc_tbl->table->count) {
+				if (burst <= S805_DMA_MAX_BURST && burst == desc_tbl->table->count
+					&& burst == next_burst) {
 					
 					if (icg <= S805_DMA_MAX_SKIP) {
 						
@@ -491,7 +492,8 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 			
 			if (!desc_tbl->table->dst_burst) {
 				
-				if (burst <= S805_DMA_MAX_BURST && burst == desc_tbl->table->count) {
+				if (burst <= S805_DMA_MAX_BURST && burst == desc_tbl->table->count
+					&& burst == next_burst) {
 					
 					if (icg <= S805_DMA_MAX_SKIP) {
 						
