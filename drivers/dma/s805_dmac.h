@@ -99,6 +99,9 @@ struct s805_desc {
 	/* For cyclic transfers */
 	struct s805_desc * next;
 	struct s805_desc * root;
+
+	/* For crypto requests */
+	uint byte_count;
 	
 };
 

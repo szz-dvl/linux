@@ -5,7 +5,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/s805_dmac.h>
 
-#define S805_DIVX_BLOCK_SIZE                        2 /*??*/
+#define S805_DIVX_BLOCK_SIZE                        8 /*??*/
 #define S805_DIVX_CTRL                              P_NDMA_RIJNDAEL_CONTROL
 #define S805_DIVX_RK_FIFO                           P_NDMA_RIJNDAEL_RK_FIFO
 
@@ -183,7 +183,7 @@ static int s805_divx_decompress (struct acomp_req *req) {
 
     init_nfo->type = DIVX_DESC;
 
-	ctx->tx_desc = s805_scatterwalk (req->src, NULL, init_nfo, ctx->tx_desc, true);
+	ctx->tx_desc = s805_scatterwalk (req->src, NULL, init_nfo, ctx->tx_desc, UINT_MAX, true);
 
 	if (!ctx->tx_desc) {
 		

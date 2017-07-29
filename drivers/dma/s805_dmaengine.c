@@ -330,19 +330,19 @@ static s805_dtable * sg_init_desc (s805_dtable * chunk, s805_init_desc * init_nf
 
 /* Public functions, for crypto modules */
 
-static void s805_dma_desc_free(struct virt_dma_desc *vd);
+/* static void s805_dma_desc_free(struct virt_dma_desc *vd); */
 
-/**
- * s805_desc_early_free - Public funtion offered to crypto modules through "linux/s805_dmac.h", 
- * meant to "early" free a failed descriptor.
- *
- * @tx_desc: The descriptor to be closed.
- *
- */
-void s805_desc_early_free (struct dma_async_tx_descriptor * tx_desc) {
+/* /\** */
+/*  * s805_desc_early_free - Public funtion offered to crypto modules through "linux/s805_dmac.h",  */
+/*  * meant to "early" free a failed descriptor. */
+/*  * */
+/*  * @tx_desc: The descriptor to be closed. */
+/*  * */
+/*  *\/ */
+/* void s805_desc_early_free (struct dma_async_tx_descriptor * tx_desc) { */
 
-    s805_dma_desc_free(&to_s805_dma_desc(tx_desc)->vd);
-}
+/*     s805_dma_desc_free(&to_s805_dma_desc(tx_desc)->vd); */
+/* } */
 
 /**
  * s805_close_desc - Public funtion offered to crypto modules through "linux/s805_dmac.h", 
@@ -374,6 +374,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 												   struct scatterlist * dst_sg,
 												   s805_init_desc * init_nfo,
 												   struct dma_async_tx_descriptor * tx_desc,
+												   uint limit,
 												   bool last)
 {
 	
@@ -382,12 +383,13 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 	s805_dtable * temp, * desc_tbl;
 	unsigned int src_len, dst_len;
 	dma_addr_t src_addr, dst_addr;
-	int min_size, next_burst;
+	int next_burst;
 	bool new_block, src_completed;
-	uint act_size, icg, burst;
+	uint act_size, icg, burst, min_size;
 		
 	d = init_nfo->d = to_s805_dma_desc(tx_desc);
-
+	limit -= d->byte_count;
+	
 	spin_lock(&d->c->vc.lock);
 	
 	desc_tbl = sg_init_desc (NULL, init_nfo);
@@ -409,16 +411,16 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 		desc_tbl->table->dst = dst_addr;
 	
 	/* "Fwd logic" ¿not optimal?, must do. */
-	while (src_info.cursor || dst_info.cursor) {
+	while ((src_info.cursor || dst_info.cursor) && limit) {
 		
 		src_len = get_sg_remain(&src_info);
 		dst_len = get_sg_remain(&dst_info);
 		
-	    min_size = min(dst_len, src_len);
+	    min_size = min(min(dst_len, src_len), limit);
 		
-	    while (min_size > 0) {
+	    while (min_size) {
 			
-			act_size = min_size <= S805_MAX_TR_SIZE ? min_size : S805_MAX_TR_SIZE;
+			act_size = min(min_size, (uint) S805_MAX_TR_SIZE);
 			
 			if ((desc_tbl->table->count + act_size) > S805_MAX_TR_SIZE) {
 				
@@ -439,8 +441,10 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 			
 			src_info.bytes += act_size;
 			dst_info.bytes += act_size;
+			d->byte_count += act_size;
 			
 		    min_size -= act_size;
+			limit -= act_size;
 		}
 		
 		/* Either src entry or dst entry or both are complete here.  */
@@ -519,7 +523,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 			
 	    }
 		
-		new_block = new_block && (dst_info.cursor || src_info.cursor);
+		new_block = new_block && ((dst_info.cursor || src_info.cursor) && limit);
 		
 		if (new_block) {
 			
@@ -1550,7 +1554,7 @@ s805_dma_prep_sg (struct dma_chan *chan,
 
 	tx_desc = vchan_tx_prep(&c->vc, &d->vd, flags);
 	
-    tx_desc = s805_scatterwalk (src_sg, dst_sg, init_nfo, tx_desc, true);
+    tx_desc = s805_scatterwalk (src_sg, dst_sg, init_nfo, tx_desc, UINT_MAX, true);
 
 	kfree (init_nfo);
 

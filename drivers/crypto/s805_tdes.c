@@ -251,6 +251,11 @@ static int s805_tdes_crypt_prep (struct ablkcipher_request *req, s805_tdes_mode 
 	s805_init_desc * init_nfo;
 	int len, j = 0;
 	
+	if (!IS_ALIGNED(req->nbytes, TDES_MIN_BLOCK_SIZE)) {
+		
+		dev_err(tdes_mgr->dev, "%s: Unaligned byte count (%u).\n", __func__, req->nbytes);
+		return -EINVAL;
+	}
 	
 	/* Allocate and setup the information for descriptor initialization */
 	init_nfo = kzalloc(sizeof(s805_init_desc), GFP_NOWAIT); /* May we do this with GFP_KERNEL?? */
@@ -289,7 +294,7 @@ static int s805_tdes_crypt_prep (struct ablkcipher_request *req, s805_tdes_mode 
 		return -ENOMEM;
 	}
 
-	rctx->tx_desc = s805_scatterwalk (req->src, req->dst, init_nfo, rctx->tx_desc, true);
+	rctx->tx_desc = s805_scatterwalk (req->src, req->dst, init_nfo, rctx->tx_desc, req->nbytes, true);
 
 	if (!rctx->tx_desc) {
 		

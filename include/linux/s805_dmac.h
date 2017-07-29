@@ -58,7 +58,10 @@ struct s805_desc {
 
 	/* For cyclic transfers */
 	struct s805_desc * next;
-	struct s805_desc * root;	
+	struct s805_desc * root;
+
+	/* For crypto requests */
+	uint byte_count;
 };
 
 #endif
@@ -178,10 +181,11 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 												   struct scatterlist * dst_sg,
 												   s805_init_desc * init_nfo,
 												   struct dma_async_tx_descriptor * tx_desc,
+												   uint limit,
 												   bool last);
 
 bool s805_close_desc (struct dma_async_tx_descriptor * tx_desc); /* CRC  */
-void s805_desc_early_free (struct dma_async_tx_descriptor * tx_desc);
+/* void s805_desc_early_free (struct dma_async_tx_descriptor * tx_desc); */
 
 #ifdef CONFIG_CRYPTO_DEV_S805_AES
 s805_dtable * sg_aes_move_along (s805_dtable * cursor, s805_init_desc * init_nfo);

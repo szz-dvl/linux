@@ -8,7 +8,7 @@
 
 #define S805_CRC_CHECK_SUM                   P_NDMA_CRC_OUT
 #define S805_CRC_DIGEST_SIZE                 4
-#define S805_CRC_BLOCK_SIZE                  2 /* ?? */
+#define S805_CRC_BLOCK_SIZE                  8 /* ?? */
 
 #define S805_DTBL_CRC_NO_WRITE(val)          ((val & 0x1) << 4) 
 #define S805_DTBL_CRC_RESET(val)             ((val & 0x1) << 3)
@@ -158,6 +158,13 @@ static int s805_crc_add_data (struct ahash_request *req, bool last) {
 
 	struct s805_crc_reqctx *ctx = ahash_request_ctx(req);
 
+	if (!IS_ALIGNED(req->nbytes, S805_CRC_BLOCK_SIZE)) {
+		
+		dev_err(crc_mgr->dev, "%s: Unaligned byte count (%u).\n", __func__, req->nbytes);
+		return -EINVAL;
+		
+	}
+	
 	if (!ctx->initialized) {
 
 		dev_err(crc_mgr->dev, "%s: Uninitialized request.\n", __func__);
@@ -172,7 +179,7 @@ static int s805_crc_add_data (struct ahash_request *req, bool last) {
 		
 	}
 	
-	ctx->tx_desc = s805_scatterwalk (req->src, NULL, ctx->init_nfo, ctx->tx_desc, last);
+	ctx->tx_desc = s805_scatterwalk (req->src, NULL, ctx->init_nfo, ctx->tx_desc, req->nbytes, last);
 
 	if (!ctx->tx_desc) {
 		
@@ -188,6 +195,13 @@ static int s805_crc_init_ctx (struct ahash_request *req) {
 
 	struct s805_crc_reqctx *ctx = ahash_request_ctx(req);
 
+	if (!IS_ALIGNED(req->nbytes, S805_CRC_BLOCK_SIZE)) {
+		
+		dev_err(crc_mgr->dev, "%s: Unaligned byte count (%u).\n", __func__, req->nbytes);
+		return -EINVAL;
+		
+	}
+	
 	if (ctx->initialized)
 		return 1;
 	else if (ctx->finalized)
@@ -225,7 +239,7 @@ static int s805_crc_init_ctx (struct ahash_request *req) {
 		}
 	}
 	
-	req->base.data = req->result; /* To easily recover the result from completion callback. */
+	//req->base.data = req->result; /* To easily recover the result from completion callback. */
 	ctx->initialized = true;
 	
 	return 0;

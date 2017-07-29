@@ -370,9 +370,18 @@ static int s805_aes_crypt_prep (struct ablkcipher_request * req, s805_aes_mode m
 			return ret;
 			
 	}
+
+	if (!IS_ALIGNED(req->nbytes, AES_BLOCK_SIZE)) {
+		
+		dev_err(aes_mgr->dev, "%s: Unaligned byte count (%u).\n", __func__, req->nbytes);
+		return -EINVAL;
+	}
 	
 	/* Allocate and setup the information for descriptor initialization */
-	init_nfo = kzalloc(sizeof(s805_init_desc), GFP_NOWAIT); /* May we do this with GFP_KERNEL?? */
+	init_nfo = kzalloc(sizeof(s805_init_desc),
+					   crypto_ablkcipher_get_flags(crypto_ablkcipher_reqtfm(req)) & CRYPTO_TFM_REQ_MAY_SLEEP
+					   ? GFP_KERNEL
+					   : GFP_NOWAIT);
 
 	if (!init_nfo) {
 	    dev_err(aes_mgr->dev, "%s: Failed to allocate initialization info structure.\n", __func__);
@@ -419,7 +428,7 @@ static int s805_aes_crypt_prep (struct ablkcipher_request * req, s805_aes_mode m
 		return -ENOMEM;
 	}
 
-	rctx->tx_desc = s805_scatterwalk (req->src, req->dst, init_nfo, rctx->tx_desc, true);
+	rctx->tx_desc = s805_scatterwalk (req->src, req->dst, init_nfo, rctx->tx_desc, req->nbytes, true);
 	
 	if (!rctx->tx_desc) {
 		
@@ -482,7 +491,7 @@ static struct crypto_alg s805_aes_algs[] = {
 	.cra_flags		    = CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC, //CRYPTO_ALG_GENIV | CRYPTO_ALG_TYPE_GIVCIPHER | 
 	.cra_blocksize		= AES_BLOCK_SIZE,
 	.cra_ctxsize		= sizeof(struct s805_aes_ctx),
-	.cra_alignmask		= 0,
+	.cra_alignmask		= AES_BLOCK_SIZE - 1,
 	.cra_type		    = &crypto_ablkcipher_type,
 	.cra_module		    = THIS_MODULE,
 	.cra_init		    = s805_aes_cra_init,
@@ -502,7 +511,7 @@ static struct crypto_alg s805_aes_algs[] = {
 	.cra_flags		    = CRYPTO_ALG_TYPE_GIVCIPHER | CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC, //CRYPTO_ALG_GENIV | 
 	.cra_blocksize		= AES_BLOCK_SIZE,
 	.cra_ctxsize		= sizeof(struct s805_aes_ctx),
-	.cra_alignmask		= 0,
+	.cra_alignmask		= AES_BLOCK_SIZE - 1,
 	.cra_type		    = &crypto_givcipher_type,
 	.cra_module		    = THIS_MODULE,
 	.cra_init		    = s805_aes_cra_init,
@@ -523,7 +532,7 @@ static struct crypto_alg s805_aes_algs[] = {
 	.cra_flags		    = CRYPTO_ALG_TYPE_GIVCIPHER | CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC, //CRYPTO_ALG_GENIV | 
 	.cra_blocksize		= AES_BLOCK_SIZE,
 	.cra_ctxsize		= sizeof(struct s805_aes_ctx),
-	.cra_alignmask		= 0,
+	.cra_alignmask		= AES_BLOCK_SIZE - 1,
 	.cra_type		    = &crypto_givcipher_type,
 	.cra_module		    = THIS_MODULE,
 	.cra_init		    = s805_aes_cra_init,
