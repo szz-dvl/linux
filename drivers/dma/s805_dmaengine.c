@@ -540,7 +540,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 			if (!desc_tbl->table->dst)
 				desc_tbl->table->dst = dst_addr + (dma_addr_t)dst_info.bytes;
 			
-		} else if (!dst_info.cursor && !src_info.cursor) {
+		} else if ((!dst_info.cursor && !src_info.cursor) || !limit) {
 			
 			list_add_tail(&desc_tbl->elem, &d->desc_list);
 		    d->frames ++;	
