@@ -7,6 +7,7 @@
 
 /* Registers & Bitmaps for the s805 DMAC TDES algorithm. */
 #define TDES_KEY_SIZE                         DES3_EDE_KEY_SIZE
+#define DDES_KEY_SIZE                         DES_KEY_SIZE * 2
 
 #define S805_TDES_CTRL                        P_NDMA_TDES_CONTROL
 #define S805_TDES_KEY_HI                      P_NDMA_TDES_KEY_HI
@@ -29,7 +30,7 @@ typedef enum tdes_dir {
 
 typedef enum des_type {
     DES_SIMPLE,
-    DES_TRIPLE
+	DES_MULTI
 } s805_des_type;
 
 struct s805_tdes_mgr {
@@ -131,10 +132,9 @@ static inline void s805_tdes_set_hw_regs (struct ablkcipher_request *req) {
 	struct s805_tdes_ctx *ctx = crypto_ablkcipher_ctx(crypto_ablkcipher_reqtfm(req));
 	struct s805_tdes_reqctx *rctx = ablkcipher_request_ctx(req);
 	
-	uint idx;
 	u64 key;
-	u32 khi, klow, ctrl;
-	uint limit = 3;
+	u32 khi, klow;
+	uint idx, limit = TDES_KEY_SIZE / sizeof(u64);
 	
 	for (idx = 0; idx < limit; idx ++) {
 		
@@ -146,19 +146,76 @@ static inline void s805_tdes_set_hw_regs (struct ablkcipher_request *req) {
 		WR (khi, S805_TDES_KEY_HI);
 		WR (klow, S805_TDES_KEY_LO);
 		
-		WR (S805_CTRL_TDES_PUSH_KEY(rctx->dir ? 2 - idx : idx), S805_TDES_CTRL);
+		WR (S805_CTRL_TDES_PUSH_KEY(rctx->dir ? (limit - 1) - idx : idx), S805_TDES_CTRL);
 	}
 	
-	ctrl = S805_CTRL_TDES_MODE(rctx->mode) | S805_CTRL_TDES_DIR(rctx->dir) | S805_CTRL_TDES_PUSH_MODE;
+	WR(S805_CTRL_TDES_MODE(rctx->mode) | S805_CTRL_TDES_DIR(rctx->dir) | S805_CTRL_TDES_PUSH_MODE, S805_TDES_CTRL);
+}
+
+static int s805_tdes_setkey(struct crypto_ablkcipher *tfm, const u8 *key, unsigned int keylen)
+{
+	struct s805_tdes_ctx *ctx = crypto_ablkcipher_ctx(tfm);
+	u64 * kcomp = (u64 *) key;
+	uint i, j;
+	bool bad_key = false;
+
+	/* Wrong key sizes filtered out by interface. */
+
+	for (i = 0; i < keylen / sizeof(u64) && !bad_key; i++ ) {
+
+		for (j = i + 1; j < keylen / sizeof(u64) && !bad_key; j++ ) {
+
+			if (kcomp[i] == kcomp[j])
+			    bad_key = true;
+		}
+	}
 	
-	WR(ctrl, S805_TDES_CTRL);
+	if (bad_key) {
+		
+		/* 	
+			We don't allow repeated key components for TDES, since we will be performing either a DES
+			or a double DES transform. Same thing will apply for double DES / 2DES.
+		*/
+		
+		dev_err(tdes_mgr->dev, "%s: Bad Key for TDES mode.\n", __func__);
+		return -EINVAL;
+	}
+
+	memcpy(ctx->key, key, keylen);
+	ctx->keylen = keylen;
+
+	return 0;
+}
+
+static int s805_ddes_setkey(struct crypto_ablkcipher *tfm, const u8 *key, unsigned int keylen)
+{
+
+	struct s805_tdes_ctx *ctx = crypto_ablkcipher_ctx(tfm);
+	u64 * kcomp = (u64 *) key;
+
+	/* Wrong key sizes filtered out by interface. */
+	
+	if (kcomp[0] == kcomp[1]) {
+		
+		dev_err(tdes_mgr->dev, "%s: Bad Key for double DES mode.\n", __func__);
+		return -EINVAL;
+	}
+
+	/* This is actually a particular case of TDES where K3 == K1 while K1 != K2. */
+	memcpy(ctx->key, key, keylen);
+	memcpy(ctx->key + keylen, key, keylen/2);
+	
+	ctx->keylen = keylen;
+
+	return 0;
 }
 
 static int s805_des_setkey(struct crypto_ablkcipher *tfm, const u8 *key, unsigned int keylen)
 {
 	struct s805_tdes_ctx *ctx = crypto_ablkcipher_ctx(tfm);
-
+	
 	/* Wrong key sizes filtered out by interface. */
+	
 	memcpy(ctx->key, key, keylen);
 	ctx->keylen = keylen;
 
@@ -306,25 +363,25 @@ static int s805_tdes_crypt_prep (struct ablkcipher_request *req, s805_tdes_mode 
 
 static int s805_tdes_ecb_encrypt(struct ablkcipher_request *req) {
 
-    return s805_tdes_crypt_prep (req, TDES_MODE_ECB, TDES_DIR_ENCRYPT, DES_TRIPLE);
+    return s805_tdes_crypt_prep (req, TDES_MODE_ECB, TDES_DIR_ENCRYPT, DES_MULTI);
 
 }
 
 static int s805_tdes_ecb_decrypt(struct ablkcipher_request *req) {
 
-	return s805_tdes_crypt_prep (req, TDES_MODE_ECB, TDES_DIR_DECRYPT, DES_TRIPLE);
+	return s805_tdes_crypt_prep (req, TDES_MODE_ECB, TDES_DIR_DECRYPT, DES_MULTI);
 	
 }
 
 static int s805_tdes_cbc_encrypt(struct ablkcipher_request *req) {
 
-	return s805_tdes_crypt_prep (req, TDES_MODE_CBC, TDES_DIR_ENCRYPT, DES_TRIPLE);
+	return s805_tdes_crypt_prep (req, TDES_MODE_CBC, TDES_DIR_ENCRYPT, DES_MULTI);
 
 }
 
 static int s805_tdes_cbc_decrypt(struct ablkcipher_request *req) {
 
-	return s805_tdes_crypt_prep (req, TDES_MODE_CBC, TDES_DIR_DECRYPT, DES_TRIPLE);
+	return s805_tdes_crypt_prep (req, TDES_MODE_CBC, TDES_DIR_DECRYPT, DES_MULTI);
 
 }
 
@@ -394,6 +451,46 @@ static struct crypto_alg s805_tdes_algs[] = {
 	}
 },
 {
+	.cra_name		    = "ecb(ddes)-hw",
+	.cra_driver_name	= "s805-ecb-ddes",
+	.cra_priority		= 300,
+	.cra_flags		    = CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC,
+	.cra_blocksize		= DES_BLOCK_SIZE,
+	.cra_ctxsize		= sizeof(struct s805_tdes_ctx),
+	.cra_alignmask		= DES_BLOCK_SIZE - 1,
+	.cra_type		    = &crypto_ablkcipher_type,
+	.cra_module		    = THIS_MODULE,
+	.cra_init		    = s805_tdes_cra_init,
+	.cra_exit		    = s805_tdes_cra_exit,
+	.cra_u.ablkcipher   = {
+		.min_keysize	     = DDES_KEY_SIZE,
+		.max_keysize	     = DDES_KEY_SIZE,
+		.setkey		         = s805_ddes_setkey,
+		.encrypt	         = s805_tdes_ecb_encrypt,
+		.decrypt	         = s805_tdes_ecb_decrypt,
+	}
+},
+{
+	.cra_name		    = "cbc(ddes)-hw",
+	.cra_driver_name	= "s805-cbc-ddes",
+	.cra_priority		= 300,
+	.cra_flags		    = CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC,
+	.cra_blocksize		= DES_BLOCK_SIZE,
+	.cra_ctxsize		= sizeof(struct s805_tdes_ctx),
+	.cra_alignmask		= DES_BLOCK_SIZE - 1,
+	.cra_type		    = &crypto_ablkcipher_type,
+	.cra_module		    = THIS_MODULE,
+	.cra_init		    = s805_tdes_cra_init,
+	.cra_exit		    = s805_tdes_cra_exit,
+	.cra_u.ablkcipher   = {
+		.min_keysize	     = DDES_KEY_SIZE,
+		.max_keysize	     = DDES_KEY_SIZE,
+		.setkey		         = s805_ddes_setkey,
+		.encrypt	         = s805_tdes_cbc_encrypt,
+	    .decrypt	         = s805_tdes_cbc_decrypt,
+	}
+},
+{
 	.cra_name		    = "ecb(tdes)-hw",
 	.cra_driver_name	= "s805-ecb-tdes",
 	.cra_priority		= 300,
@@ -408,7 +505,7 @@ static struct crypto_alg s805_tdes_algs[] = {
 	.cra_u.ablkcipher   = {
 		.min_keysize	     = TDES_KEY_SIZE,
 		.max_keysize	     = TDES_KEY_SIZE,
-		.setkey		         = s805_des_setkey,
+		.setkey		         = s805_tdes_setkey,
 		.encrypt	         = s805_tdes_ecb_encrypt,
 		.decrypt	         = s805_tdes_ecb_decrypt,
 	}
@@ -428,7 +525,7 @@ static struct crypto_alg s805_tdes_algs[] = {
 	.cra_u.ablkcipher   = {
 		.min_keysize	     = TDES_KEY_SIZE,
 		.max_keysize	     = TDES_KEY_SIZE,
-		.setkey		         = s805_des_setkey,
+		.setkey		         = s805_tdes_setkey,
 		.encrypt	         = s805_tdes_cbc_encrypt,
 	    .decrypt	         = s805_tdes_cbc_decrypt,
 	}
