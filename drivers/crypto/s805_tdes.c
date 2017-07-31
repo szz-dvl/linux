@@ -99,8 +99,10 @@ static s805_dtable * def_init_tdes_tdesc (unsigned int frames, s805_tdes_mode mo
 
 	/* Crypto block */
 	desc_tbl->table->crypto |= S805_DTBL_TDES_POST_ENDIAN(ENDIAN_NO_CHANGE);
-	desc_tbl->table->crypto |= S805_DTBL_TDES_CURR_KEY(0); 
-	desc_tbl->table->crypto |= S805_DTBL_TDES_RESTART(mode);
+	desc_tbl->table->crypto |= S805_DTBL_TDES_CURR_KEY(0);
+
+	/* See note for CBC chainig pipeline reset at: s805_aes.c, */
+	desc_tbl->table->crypto |= S805_DTBL_TDES_RESTART(mode ? !frames : 0);
 	
 	return desc_tbl;
 	
@@ -173,7 +175,7 @@ static int s805_tdes_setkey(struct crypto_ablkcipher *tfm, const u8 *key, unsign
 	if (bad_key) {
 		
 		/* 	
-			We don't allow repeated key components for TDES, since we will be performing either a DES
+		    The driver won't allow repeated key components for TDES, since we will be performing either a DES
 			or a double DES transform. Same thing will apply for double DES / 2DES.
 		*/
 		
@@ -322,7 +324,7 @@ static int s805_tdes_crypt_prep (struct ablkcipher_request *req, s805_tdes_mode 
 		len = sg_dma_len(aux);
 
 		if (!IS_ALIGNED(len, DES_BLOCK_SIZE)) {
-		    dev_err(tdes_mgr->dev, "%s: Block %d of src sg list is not aligned with DES_BLOCK_SIZE (%u Bytes).\n", __func__, j, DES_BLOCK_SIZE);
+		    dev_err(tdes_mgr->dev, "%s: Chunk %d of src sg list is not aligned with DES_BLOCK_SIZE (%u Bytes).\n", __func__, j, DES_BLOCK_SIZE);
 			kfree(init_nfo);
 			return -EINVAL;
 		}
@@ -344,7 +346,7 @@ static int s805_tdes_crypt_prep (struct ablkcipher_request *req, s805_tdes_mode 
 
 	if (!rctx->tx_desc) {
 		
-		dev_err(tdes_mgr->dev, "%s: Failed to allocate dma descriptors.\n", __func__);
+		dev_err(tdes_mgr->dev, "%s: Failed to allocate data chunks.\n", __func__);
 		kfree(init_nfo);
 		return -ENOMEM;
 		

@@ -74,7 +74,7 @@ static s805_dtable * def_init_crc_tdesc (unsigned int frames)
 
 	/* Crypto block */
 	desc_tbl->table->crypto |= S805_DTBL_CRC_POST_ENDIAN(ENDIAN_NO_CHANGE);
-	desc_tbl->table->crypto |= S805_DTBL_CRC_RESET(frames ? 0 : 1); /* To be tested. */
+	desc_tbl->table->crypto |= S805_DTBL_CRC_RESET(!frames); /* To be tested. */
 	desc_tbl->table->crypto |= S805_DTBL_CRC_NO_WRITE(1);
 
 	desc_tbl->table->crypto |= S805_DTBL_CRC_COUNT(frames); /* Is this correct?, is the field really unused?, if it is not is the frame number what it expects? ... To be tested.*/

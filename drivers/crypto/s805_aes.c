@@ -96,7 +96,17 @@ static s805_dtable * def_init_aes_tdesc (unsigned int frames, s805_aes_key_type 
 	desc_tbl->table->crypto |= S805_DTBL_AES_PRE_ENDIAN(ENDIAN_NO_CHANGE); /* mode == AES_MODE_CTR && !dir ? ENDIAN_TYPE_7 : ENDIAN_NO_CHANGE*/
 	desc_tbl->table->crypto |= S805_DTBL_AES_KEY_TYPE(type);
 	desc_tbl->table->crypto |= S805_DTBL_AES_DIR(dir);
-	desc_tbl->table->crypto |= S805_DTBL_AES_RESET_IV(mode ? 1 : 0); /* mode ? 1 : 0 (mode == AES_MODE_CBC) */
+
+	/* 
+	   The driver will reset the CBC chaining pipeline ONLY for the first frame of the data chunk, 
+	   so for CBC mode all the data gathered in one request will be dependent of the rest of the data
+	   in the request, meaning that, in a ddition to key an IVs, no chunk for this requests will be 
+	   decrypable without the rest of the chunks of the same request. This may generate some unwanted data 
+	   dependencies, so developer must be aware of that, and, join in a request only data that is expected
+	   to be decrypted at the same time too. If the latter condition is satisfied, this must increase encryption 
+	   secureness for CBC modes. Same thing will apply for DES variants CBC modes.
+	*/
+	desc_tbl->table->crypto |= S805_DTBL_AES_RESET_IV(mode ? !frames : 0); /* mode ? 1 : 0 (mode == AES_MODE_CBC) */
 	desc_tbl->table->crypto |= S805_DTBL_AES_MODE(mode);
 	
 	return desc_tbl;
