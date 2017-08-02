@@ -316,14 +316,14 @@ static void s805_aes_crypt_handle_completion (void * req_ptr) {
 	ctx->pending --;
 	spin_unlock(&ctx->lock);
 
-	req->base.complete(&req->base, 0);
-	
 	spin_lock(&aes_mgr->lock);
 	list_del(&job->elem);
 	spin_unlock(&aes_mgr->lock);
-	
-	job = list_first_entry_or_null (&aes_mgr->jobs, struct s805_aes_reqctx, elem);
 
+	job = list_first_entry_or_null (&aes_mgr->jobs, struct s805_aes_reqctx, elem);
+	
+	req->base.complete(&req->base, 0);
+    
 	if (job)  
 		s805_aes_crypt_launch_job(to_ablkcipher_request(job), true);
 	else {

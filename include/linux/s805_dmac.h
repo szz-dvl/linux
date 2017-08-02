@@ -62,6 +62,7 @@ struct s805_desc {
 
 	/* For crypto requests */
 	uint byte_count;
+	bool is_crypto;
 };
 
 #endif
@@ -73,6 +74,8 @@ struct s805_desc {
 #define S805_DTBL_IRQ                    BIT(21)
 #define S805_DTBL_SRC_HOLD               BIT(26) 
 #define S805_DTBL_DST_HOLD               BIT(25)
+#define S805_DMA_CLK                     P_HHI_GCLK_MPEG1
+#define S805_DMA_CRYPTO_FLAG             BIT(10)
 
 typedef enum s805_dma_status {
 	S805_DMA_SUCCESS,

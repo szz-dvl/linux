@@ -32,7 +32,6 @@
 #define S805_MAX_TR_SIZE                 (0x1FFFFFF - (S805_DMA_ALIGN_SIZE - 1)) 
 
 #define S805_DMA_THREAD_CTRL             P_NDMA_THREAD_REG
-#define S805_DMA_CLK                     P_HHI_GCLK_MPEG1
 
 #define S805_DMA_DLST_STR0               P_NDMA_THREAD_TABLE_START0
 #define S805_DMA_DLST_END0               P_NDMA_THREAD_TABLE_END0
@@ -51,14 +50,22 @@
 #define S805_DMA_THREAD_INIT(th)         (1 << (24 + th))
 #define S805_DMA_THREAD_ENABLE(th)       (1 << (8 + th))
 
-#define S805_DTBL_NO_BREAK               BIT(8) /* To be tested */
+#define S805_DTBL_NO_BREAK               BIT(8) /* To be tested */                  
+
+struct memset_val {
+
+	unsigned long long val;
+
+} __attribute__ ((aligned (32)));
 
 struct memset_info {
 
-	unsigned long long * value;
+    struct memset_val * value;
 	dma_addr_t paddr;
+
 };
 
+//d->memset->value
 /**
  * struct sg_info - Auxiliar structure to iterate sg lists.
  * 
@@ -120,7 +127,8 @@ static s805_dtable * add_zeroed_tdesc (struct s805_desc * d)
 	s805_dtable * desc_tbl = kzalloc(sizeof(s805_dtable), GFP_NOWAIT);
 
 	/* Ensure that the last descriptor will interrupt us. */
-	list_last_entry (&d->desc_list, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
+	if (!d->is_crypto)
+		list_last_entry (&d->desc_list, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
 	
 	if (!desc_tbl) 
 	    return NULL;
@@ -1704,11 +1712,9 @@ s805_dma_prep_memset (struct dma_chan *chan,
 		return NULL;
 		
 	}
-	
-	d->memset->value = dma_alloc_coherent(chan->device->dev,
-										  sizeof(unsigned long long),
-										  &d->memset->paddr,
-										  GFP_NOWAIT); 
+
+	/* With a block from the pool we will have enough here, we will save almost an entire page. */
+	d->memset->value = dma_pool_alloc(d->c->pool, GFP_NOWAIT, &d->memset->paddr);
 	
 	if (!d->memset->value) {
 		
@@ -1718,7 +1724,7 @@ s805_dma_prep_memset (struct dma_chan *chan,
 		return NULL;
 		
 	} else
-		*d->memset->value = value;
+		d->memset->value->val = value;
 
 	/*
 	  
@@ -1731,8 +1737,8 @@ s805_dma_prep_memset (struct dma_chan *chan,
 	  
 	*/
 	
-	*d->memset->value <<= (sizeof(int) * 8);
-    *d->memset->value |= (value & ~0U);
+	d->memset->value->val <<= (sizeof(int) * 8);
+    d->memset->value->val |= (value & ~0U);
 
 	spin_lock(&d->c->vc.lock);
 	
@@ -1824,6 +1830,9 @@ s805_dma_prep_interrupt (struct dma_chan *chan,
 		return NULL;
 	
 	d->c = to_s805_dma_chan(chan);
+	
+	if (flags & S805_DMA_CRYPTO_FLAG)
+		d->is_crypto = true;
 	
 	INIT_LIST_HEAD(&d->desc_list);
 	
@@ -1936,8 +1945,13 @@ static void s805_dma_desc_free(struct virt_dma_desc *vd)
 
 	//spin_unlock(&c->vc.lock);
 	
-	if (me->memset)
-		dma_free_coherent(c->vc.chan.device->dev, sizeof(long long), me->memset->value, me->memset->paddr);
+	if (me->memset) {
+		
+		dma_pool_free(me->c->pool, me->memset->value, me->memset->paddr);
+		kfree(me->memset);
+	}
+
+	//dma_free_coherent(c->vc.chan.device->dev, sizeof(long long), me->memset->value, me->memset->paddr);
 	
 	dev_dbg(c->vc.chan.device->dev, "Descriptor 0x%p: Freed.", &vd->tx);
     

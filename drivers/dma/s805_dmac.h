@@ -102,6 +102,7 @@ struct s805_desc {
 
 	/* For crypto requests */
 	uint byte_count;
+	bool is_crypto;
 	
 };
 

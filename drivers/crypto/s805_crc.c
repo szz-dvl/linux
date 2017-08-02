@@ -6,9 +6,18 @@
 #include <crypto/algapi.h>
 #include <linux/s805_dmac.h>
 
+#define S805_CRC_IRQ                         INT_AIU_CRC
 #define S805_CRC_CHECK_SUM                   P_NDMA_CRC_OUT
 #define S805_CRC_DIGEST_SIZE                 4
 #define S805_CRC_BLOCK_SIZE                  8 /* ?? */
+#define S805_CRC_P0LY_1                      P_AIU_CRC_POLY_COEF1
+#define S805_CRC_P0LY_0                      P_AIU_CRC_POLY_COEF0
+#define S805_CRC_P0LY_COEFS                  0x04C11DB7
+#define S805_CRC_ENABLE                      (BIT(15) | BIT(6) | BIT(8) | BIT(9) | BIT(10) | BIT(11) | BIT(12) | BIT(13))
+#define S805_CRC_AIU_CLK_GATE                P_HHI_GCLK_OTHER
+#define S805_CRC_ENABLE_CLK                  (BIT(14) | BIT(16))
+#define S805_CRC_CLK81                       P_HHI_GCLK_MPEG2
+#define S805_CRC_ENABLE_CLK81                BIT(29)
 
 #define S805_DTBL_CRC_NO_WRITE(val)          ((val & 0x1) << 4) 
 #define S805_DTBL_CRC_RESET(val)             ((val & 0x1) << 3)
@@ -74,10 +83,11 @@ static s805_dtable * def_init_crc_tdesc (unsigned int frames)
 
 	/* Crypto block */
 	desc_tbl->table->crypto |= S805_DTBL_CRC_POST_ENDIAN(ENDIAN_NO_CHANGE);
-	desc_tbl->table->crypto |= S805_DTBL_CRC_RESET(!frames); /* To be tested. */
+	desc_tbl->table->crypto |= S805_DTBL_CRC_RESET(!frames); /* To be tested. !frames*/
 	desc_tbl->table->crypto |= S805_DTBL_CRC_NO_WRITE(1);
 
-	desc_tbl->table->crypto |= S805_DTBL_CRC_COUNT(frames); /* Is this correct?, is the field really unused?, if it is not is the frame number what it expects? ... To be tested.*/
+	desc_tbl->table->dst = ~0U; //Send data to the parser ¿¿??
+	//desc_tbl->table->crypto |= S805_DTBL_CRC_COUNT((frames + 1)); /* Is this correct?, is the field really unused?, if it is not is the frame number what it expects? ... To be tested.*/
 	
 	return desc_tbl;
 	
@@ -104,16 +114,21 @@ static int s805_crc_launch_job (struct s805_crc_reqctx *ctx, bool chain) {
 
 		ctx->finalized = true;
 
+		/* WR(S805_CRC_P0LY_COEFS, S805_CRC_P0LY_1); */
+		WR(S805_CRC_P0LY_COEFS, S805_CRC_P0LY_0);
+		
 		tx_cookie = dmaengine_submit(ctx->tx_desc);
-			
+		
 		if(tx_cookie < 0) {
 			
 			dev_err(crc_mgr->dev, "%s: Failed to get cookie.\n", __func__);
 			return tx_cookie;
 				
 		}
-		
+
+		kfree(ctx->init_nfo); /* !!! */
 		dma_async_issue_pending(&crc_mgr->chan->vc.chan);
+
 		return 0;
 		
 	} else
@@ -132,18 +147,15 @@ static void s805_crc_handle_completion (void * req_ptr) {
 	
 	memcpy(req->result, &result, S805_CRC_DIGEST_SIZE);
 	
-	req->base.complete(&req->base, 0);
-	
 	spin_lock(&crc_mgr->lock);
 	list_del(&job->elem);
 	spin_unlock(&crc_mgr->lock);
 	
-	kfree(job->init_nfo);
 	job->initialized = false;
 
-	/* It will be user responsibility to free the result field, is this correct?, must we force the user to allocate the field too? */
-	
 	job = list_first_entry_or_null (&crc_mgr->jobs, struct s805_crc_reqctx, elem);
+	
+	req->base.complete(&req->base, 0);
 
 	if (job)  
 		s805_crc_launch_job(job, true);
@@ -179,14 +191,14 @@ static int s805_crc_add_data (struct ahash_request *req, bool last) {
 		
 	}
 	
-	ctx->tx_desc = s805_scatterwalk (req->src, NULL, ctx->init_nfo, ctx->tx_desc, req->nbytes, last);
+	ctx->tx_desc = s805_scatterwalk (req->src, NULL, ctx->init_nfo, ctx->tx_desc, req->nbytes, last); //dst = NULL
 
 	if (!ctx->tx_desc) {
 		
 		dev_err(crc_mgr->dev, "%s: Failed to add data chunk.\n", __func__);
 		return -ENOMEM;
 	}
-
+	
 	return 0;
 
 }
@@ -207,7 +219,7 @@ static int s805_crc_init_ctx (struct ahash_request *req) {
 	else if (ctx->finalized)
 		ctx->finalized = false;
 	
-	ctx->tx_desc = dmaengine_prep_dma_interrupt (&crc_mgr->chan->vc.chan, 0);
+	ctx->tx_desc = dmaengine_prep_dma_interrupt (&crc_mgr->chan->vc.chan, 0); //S805_DMA_CRYPTO_FLAG
 
 	if (!ctx->tx_desc) {
 		
@@ -226,20 +238,7 @@ static int s805_crc_init_ctx (struct ahash_request *req) {
 	}
 
 	ctx->init_nfo->type = CRC_DESC;
-
-	if (!req->result) {
-
-		/* User responsibility? */
-		req->result = kzalloc(S805_CRC_DIGEST_SIZE, GFP_NOWAIT);
-
-		if (!req->result) {
-			dev_err(crc_mgr->dev, "%s: Failed to allocate result field.\n", __func__);
-			kfree(ctx->init_nfo);
-			return -ENOMEM;
-		}
-	}
 	
-	//req->base.data = req->result; /* To easily recover the result from completion callback. */
 	ctx->initialized = true;
 	
 	return 0;
@@ -376,7 +375,7 @@ static struct ahash_alg crc_alg = {
 	.import     = s805_crc_hash_import,
 	.export     = s805_crc_hash_export,
 	.halg.digestsize = S805_CRC_DIGEST_SIZE,
-	.halg.statesize  = S805_CRC_DIGEST_SIZE, /* look 4 info. */
+	.halg.statesize  = sizeof(struct s805_crc_reqctx),
 	.halg.base	     = {
 		.cra_name		    = "crc-32-hw",
 		.cra_driver_name	= "s805-crc-32",
@@ -391,6 +390,32 @@ static struct ahash_alg crc_alg = {
 	}
 };
 
+static irqreturn_t s805_crc_callback (int irq, void *data)
+{
+
+    struct s805_crc_mgr * m = data;
+
+	u32 result = RD(S805_CRC_CHECK_SUM);
+	
+	dev_warn(m->dev, "%s: %u.\n", __func__, result);
+	
+	return IRQ_HANDLED;
+}
+
+static int s805_crc_hw_enable ( void ) {
+
+	u32 status = RD(S805_DMA_CLK);
+	WR(status | S805_CRC_ENABLE, S805_DMA_CLK);
+
+	status = RD(S805_CRC_AIU_CLK_GATE);
+	WR(status | S805_CRC_ENABLE_CLK, S805_CRC_AIU_CLK_GATE);
+
+	status = RD(S805_CRC_CLK81);
+	WR(status | S805_CRC_ENABLE_CLK81, S805_CRC_CLK81);
+	           
+	return request_irq(S805_CRC_IRQ, s805_crc_callback, 0, "s805_crc_irq", crc_mgr);
+}
+
 static int s805_crc_probe(struct platform_device *pdev)
 {
 
@@ -400,12 +425,20 @@ static int s805_crc_probe(struct platform_device *pdev)
 	
     crc_mgr = kzalloc(sizeof(struct s805_crc_mgr), GFP_KERNEL);
 	if (!crc_mgr) {
-		dev_err(&pdev->dev, "s805 CRC-32 mgr device failed to allocate.\n");
+		dev_err(&pdev->dev, "s805 CRC-32 mgr: Device failed to allocate.\n");
 		return -ENOMEM;
 	}
 
     crc_mgr->dev = &pdev->dev;
 
+	if (s805_crc_hw_enable()) {
+
+		dev_err(&pdev->dev, "s805 CRC-32 mgr: Unable to set up hw.\n");
+		kfree(crc_mgr);
+		return -ENOMEM;
+
+	}
+	
 	INIT_LIST_HEAD(&crc_mgr->jobs);
 	spin_lock_init(&crc_mgr->lock);
 	
@@ -436,6 +469,8 @@ static int s805_crc_probe(struct platform_device *pdev)
 		dev_info(crc_mgr->dev, "s805 CRC-32: grabbed dma channel (%s).\n", dma_chan_name(chan));
 		crc_mgr->chan = to_s805_dma_chan(chan);
 	}
+
+	
 	
     dev_info(crc_mgr->dev, "Loaded S805 CRC-32 crypto driver\n");
 
@@ -447,6 +482,7 @@ static int s805_crc_remove(struct platform_device *pdev)
 
 	crypto_unregister_ahash(&crc_alg);
 	dma_release_channel ( &crc_mgr->chan->vc.chan );
+	free_irq(S805_CRC_IRQ, crc_mgr);
 	kfree(crc_mgr);
 	
 	return 0;
