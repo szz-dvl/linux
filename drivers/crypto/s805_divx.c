@@ -180,9 +180,19 @@ static int s805_divx_decompress (struct acomp_req *req) {
 	    dev_err(divx_mgr->dev, "%s: Failed to allocate initialization info structure.\n", __func__);
 		return -ENOMEM;
 	}
-
+	
     init_nfo->type = DIVX_DESC;
 
+	ctx->tx_desc = dmaengine_prep_dma_interrupt (&divx_mgr->chan->vc.chan, S805_DMA_CRYPTO_FLAG | S805_DMA_CRYPTO_DIVX_FLAG);
+
+	if (!ctx->tx_desc) {
+		
+		dev_err(divx_mgr->dev, "%s: Failed to get dma descriptor.\n", __func__);
+		kfree(init_nfo);
+		return -ENOMEM;
+			
+	}
+		
 	ctx->tx_desc = s805_scatterwalk (req->src, NULL, init_nfo, ctx->tx_desc, UINT_MAX, true);
 
 	if (!ctx->tx_desc) {
@@ -190,7 +200,7 @@ static int s805_divx_decompress (struct acomp_req *req) {
 		dev_err(divx_mgr->dev, "%s: Failed to allocate data chunks.\n", __func__);
 		kfree(init_nfo);
 		return -ENOMEM;
-			
+		
 	}
 
 	kfree (init_nfo);

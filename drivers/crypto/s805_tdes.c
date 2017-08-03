@@ -159,12 +159,12 @@ static int s805_ddes_setkey(struct crypto_ablkcipher *tfm, const u8 *key, unsign
 
 	struct s805_tdes_ctx *ctx = crypto_ablkcipher_ctx(tfm);
 	u64 * kcomp = (u64 *) key;
-
+	
 	/* Wrong key sizes filtered out by interface. */
 	
 	if (kcomp[0] == kcomp[1]) {
 		
-		dev_err(tdes_mgr->dev, "%s: Bad Key for double DES mode.\n", __func__);
+		crypto_ablkcipher_set_flags(tfm, CRYPTO_TFM_RES_BAD_KEY_SCHED);
 		return -EINVAL;
 	}
 
@@ -203,7 +203,7 @@ static int s805_tdes_setkey(struct crypto_ablkcipher *tfm, const u8 *key, unsign
 			
 		*/
 		
-		dev_err(tdes_mgr->dev, "%s: Bad Key for TDES mode.\n", __func__);
+		crypto_ablkcipher_set_flags(tfm, CRYPTO_TFM_RES_BAD_KEY_SCHED);
 		return -EINVAL;
 	}
 
@@ -300,7 +300,7 @@ static int s805_tdes_crypt_prep (struct ablkcipher_request *req, s805_tdes_mode 
 	
 	if (!IS_ALIGNED(req->nbytes, DES_BLOCK_SIZE)) {
 		
-		dev_err(tdes_mgr->dev, "%s: Unaligned byte count (%u).\n", __func__, req->nbytes);
+	    crypto_ablkcipher_set_flags(crypto_ablkcipher_reqtfm(req), CRYPTO_TFM_RES_BAD_BLOCK_LEN);
 		return -EINVAL;
 	}
 	
@@ -325,7 +325,8 @@ static int s805_tdes_crypt_prep (struct ablkcipher_request *req, s805_tdes_mode 
 		len = sg_dma_len(aux);
 
 		if (!IS_ALIGNED(len, DES_BLOCK_SIZE)) {
-		    dev_err(tdes_mgr->dev, "%s: Chunk %d of src sg list is not aligned with DES_BLOCK_SIZE (%u Bytes).\n", __func__, j, DES_BLOCK_SIZE);
+			
+		    crypto_ablkcipher_set_flags(crypto_ablkcipher_reqtfm(req), CRYPTO_TFM_RES_BAD_BLOCK_LEN);
 			kfree(init_nfo);
 			return -EINVAL;
 		}
@@ -334,7 +335,7 @@ static int s805_tdes_crypt_prep (struct ablkcipher_request *req, s805_tdes_mode 
 		j ++;
 	}
 
-	rctx->tx_desc = dmaengine_prep_dma_interrupt (&tdes_mgr->chan->vc.chan, 0);
+	rctx->tx_desc = dmaengine_prep_dma_interrupt (&tdes_mgr->chan->vc.chan, S805_DMA_CRYPTO_FLAG | S805_DMA_CRYPTO_TDES_FLAG);
 
 	if (!rctx->tx_desc) {
 		

@@ -108,6 +108,8 @@ static s805_dtable * def_init_aes_tdesc (unsigned int frames, s805_aes_key_type 
 	*/
 	desc_tbl->table->crypto |= S805_DTBL_AES_RESET_IV(mode ? !frames : 0); /* mode ? 1 : 0 (mode == AES_MODE_CBC) */
 	desc_tbl->table->crypto |= S805_DTBL_AES_MODE(mode);
+
+	/* CTR limit, CTR Endian: Untested! */
 	
 	return desc_tbl;
 	
@@ -291,7 +293,7 @@ static int s805_aes_crypt_launch_job (struct ablkcipher_request *req, bool chain
 		
 		if(tx_cookie < 0) {
 		
-			dev_err(aes_mgr->dev, "%s: Failed to get cookie.\n", __func__);
+			dev_err(aes_mgr->dev, "%s: Failed to get DMA cookie.\n", __func__);
 			return tx_cookie;
 			
 		}
@@ -382,8 +384,8 @@ static int s805_aes_crypt_prep (struct ablkcipher_request * req, s805_aes_mode m
 	}
 
 	if (!IS_ALIGNED(req->nbytes, AES_BLOCK_SIZE)) {
-		
-		dev_err(aes_mgr->dev, "%s: Unaligned byte count (%u).\n", __func__, req->nbytes);
+
+	    crypto_ablkcipher_set_flags(crypto_ablkcipher_reqtfm(req), CRYPTO_TFM_RES_BAD_BLOCK_LEN);
 		return -EINVAL;
 	}
 	
@@ -402,7 +404,7 @@ static int s805_aes_crypt_prep (struct ablkcipher_request * req, s805_aes_mode m
 
 	if (keytype < 0) {
 		
-		dev_err(aes_mgr->dev, "%s: Failed to get key type.\n", __func__);
+		crypto_ablkcipher_set_flags(crypto_ablkcipher_reqtfm(req), CRYPTO_TFM_RES_BAD_KEY_LEN);
 		kfree(init_nfo);
 		return keytype;
 		
@@ -420,7 +422,8 @@ static int s805_aes_crypt_prep (struct ablkcipher_request * req, s805_aes_mode m
 		len = sg_dma_len(aux);
 		
 		if (!IS_ALIGNED(len, AES_BLOCK_SIZE)) {
-		    dev_err(aes_mgr->dev, "%s: Block %d of src sg list is not aligned with AES_BLOCK_SIZE.\n", __func__, j);
+			
+			crypto_ablkcipher_set_flags(crypto_ablkcipher_reqtfm(req), CRYPTO_TFM_RES_BAD_BLOCK_LEN);
 			kfree(init_nfo);
 			return -EINVAL;
 		}
@@ -429,7 +432,7 @@ static int s805_aes_crypt_prep (struct ablkcipher_request * req, s805_aes_mode m
 		j ++;
 	}
 	
-	rctx->tx_desc = dmaengine_prep_dma_interrupt (&aes_mgr->chan->vc.chan, 0);
+	rctx->tx_desc = dmaengine_prep_dma_interrupt (&aes_mgr->chan->vc.chan, S805_DMA_CRYPTO_FLAG | S805_DMA_CRYPTO_AES_FLAG);
 
 	if (!rctx->tx_desc) {
 		

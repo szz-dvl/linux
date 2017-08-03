@@ -7,12 +7,28 @@
 #include <linux/s805_dmac.h>
 
 #define S805_CRC_IRQ                         INT_AIU_CRC
+#define S805_CRC_PARSER_IRQ                  INT_PARSER
 #define S805_CRC_CHECK_SUM                   P_NDMA_CRC_OUT
+#define S805_CRC_CTRL                        P_AIU_CRC_CTRL
+
 #define S805_CRC_DIGEST_SIZE                 4
-#define S805_CRC_BLOCK_SIZE                  8 /* ?? */
+#define S805_CRC_BLOCK_SIZE                  8 /* DMAC Block moves are aligned to 8 Bytes, seems fair. */
+
+#define S805_CRC_EXTRA_DEBUG                 S805_CRC_CTRL
+#define S805_CRC_IRQ_MASK                    P_MEDIA_CPU_INTR_MASK
+#define S805_CRC_IRQ_BITS                    (BIT(10) | BIT(27))
+
 #define S805_CRC_P0LY_1                      P_AIU_CRC_POLY_COEF1
 #define S805_CRC_P0LY_0                      P_AIU_CRC_POLY_COEF0
+
 #define S805_CRC_P0LY_COEFS                  0x04C11DB7
+#define S805_CRC_P0LY_COEFS_R                0xEDB88320
+#define S805_CRC_P0LY_COEFS_RR               0x82608EDB
+
+#define S805_CRC_P0LY_COEFS_16               0x8005
+#define S805_CRC_P0LY_COEFS_R_16             0xA001
+#define S805_CRC_P0LY_COEFS_RR_16            0xC002
+
 #define S805_CRC_ENABLE                      (BIT(15) | BIT(6) | BIT(8) | BIT(9) | BIT(10) | BIT(11) | BIT(12) | BIT(13))
 #define S805_CRC_AIU_CLK_GATE                P_HHI_GCLK_OTHER
 #define S805_CRC_ENABLE_CLK                  (BIT(14) | BIT(16))
@@ -35,12 +51,20 @@ struct s805_crc_mgr {
 	
 };
 
+/* struct sg_dest { */
+
+/* 	struct scatterlist dst; */
+/* 	struct sg_dest * next; */
+/* }; */
+	
 struct s805_crc_reqctx {
 
 	struct dma_async_tx_descriptor * tx_desc;
 	s805_init_desc * init_nfo;
 	bool initialized;
 	bool finalized;
+
+	/* struct scatterlist dst; */
 	
 	struct list_head elem;
 
@@ -81,13 +105,14 @@ static s805_dtable * def_init_crc_tdesc (unsigned int frames)
 	if (!((frames + 1) % S805_DMA_MAX_DESC))
 		desc_tbl->table->control |= S805_DTBL_IRQ;
 
+	//desc_tbl->table->dst = ~0U; //Send data to the parser ¿¿??
+	
 	/* Crypto block */
 	desc_tbl->table->crypto |= S805_DTBL_CRC_POST_ENDIAN(ENDIAN_NO_CHANGE);
 	desc_tbl->table->crypto |= S805_DTBL_CRC_RESET(!frames); /* To be tested. !frames*/
-	desc_tbl->table->crypto |= S805_DTBL_CRC_NO_WRITE(1);
-
-	desc_tbl->table->dst = ~0U; //Send data to the parser ¿¿??
-	//desc_tbl->table->crypto |= S805_DTBL_CRC_COUNT((frames + 1)); /* Is this correct?, is the field really unused?, if it is not is the frame number what it expects? ... To be tested.*/
+	desc_tbl->table->crypto |= S805_DTBL_CRC_NO_WRITE(0);
+	
+	desc_tbl->table->crypto |= S805_DTBL_CRC_COUNT((frames + 1)); /* Is this correct?, is the field really unused?. To be tested.*/
 	
 	return desc_tbl;
 	
@@ -114,8 +139,11 @@ static int s805_crc_launch_job (struct s805_crc_reqctx *ctx, bool chain) {
 
 		ctx->finalized = true;
 
-		/* WR(S805_CRC_P0LY_COEFS, S805_CRC_P0LY_1); */
-		WR(S805_CRC_P0LY_COEFS, S805_CRC_P0LY_0);
+		WR(S805_CRC_P0LY_COEFS_16, S805_CRC_P0LY_1);
+		WR(S805_CRC_P0LY_COEFS_16, S805_CRC_P0LY_0);
+		WR(0, S805_CRC_CHECK_SUM);
+		//WR(0xFF00, S805_CRC_CTRL);
+		
 		
 		tx_cookie = dmaengine_submit(ctx->tx_desc);
 		
@@ -142,21 +170,35 @@ static void s805_crc_handle_completion (void * req_ptr) {
 
     struct ahash_request *req = req_ptr;
 	struct s805_crc_reqctx *job = ahash_request_ctx(req);
-	
+	uint i;
+	u32 * res = (u32 *) req->result;
+
 	u32 result = RD(S805_CRC_CHECK_SUM);
-	
 	memcpy(req->result, &result, S805_CRC_DIGEST_SIZE);
+
+	/* WR(~0U, S805_CRC_CHECK_SUM); */
+	
+	for (i = 1; i < 12; i++) {
+
+		u32 result = RD(S805_CRC_EXTRA_DEBUG + (i - 1));
+	
+		memcpy(&res[i], &result, S805_CRC_DIGEST_SIZE);
+	}
+
+	//print_hex_dump_bytes("Dest Content: ", DUMP_PREFIX_NONE, sg_virt(&job->dst), sg_dma_len(&job->dst));
+	//dma_free_coherent(NULL, sg_dma_len(&job->dst), sg_virt(&job->dst), sg_dma_address(&job->dst));
+	//WR(0xFFFF, S805_CRC_CTRL);
 	
 	spin_lock(&crc_mgr->lock);
 	list_del(&job->elem);
 	spin_unlock(&crc_mgr->lock);
 	
 	job->initialized = false;
-
+	
 	job = list_first_entry_or_null (&crc_mgr->jobs, struct s805_crc_reqctx, elem);
 	
 	req->base.complete(&req->base, 0);
-
+	
 	if (job)  
 		s805_crc_launch_job(job, true);
 	else {
@@ -166,13 +208,34 @@ static void s805_crc_handle_completion (void * req_ptr) {
 	}
 }
 
+/* Debug */
+static bool crc_map_dst (struct scatterlist * sg, uint len) {
+
+	sg_init_table(sg, 1);
+    sg_set_buf(sg, dma_alloc_coherent(NULL,
+									  len,
+									  &sg_dma_address(sg),
+									  GFP_ATOMIC), len);
+	
+	if (dma_mapping_error(NULL, sg_dma_address(sg))) {
+		
+		pr_err("%s: Dma allocation failed (%p, 0x%08x).\n", __func__, sg_virt(sg), sg_dma_address(sg));
+		return false;
+		
+	} else
+		memset(sg_virt(sg), 0, len);
+	
+	return true;
+	
+}
+
 static int s805_crc_add_data (struct ahash_request *req, bool last) {
 
 	struct s805_crc_reqctx *ctx = ahash_request_ctx(req);
 
 	if (!IS_ALIGNED(req->nbytes, S805_CRC_BLOCK_SIZE)) {
 		
-		dev_err(crc_mgr->dev, "%s: Unaligned byte count (%u).\n", __func__, req->nbytes);
+	    crypto_ahash_set_flags(crypto_ahash_reqtfm(req), CRYPTO_TFM_RES_BAD_BLOCK_LEN);
 		return -EINVAL;
 		
 	}
@@ -190,8 +253,19 @@ static int s805_crc_add_data (struct ahash_request *req, bool last) {
 		return -EINVAL;
 		
 	}
+
+	/* if (!crc_map_dst(&ctx->dst, sg_dma_len(req->src))) */
+	/* 	return -ENOMEM; &ctx->dst */
 	
-	ctx->tx_desc = s805_scatterwalk (req->src, NULL, ctx->init_nfo, ctx->tx_desc, req->nbytes, last); //dst = NULL
+	/* ctx->tx_desc = s805_scatterwalk (req->src, req->src, ctx->init_nfo, ctx->tx_desc, req->nbytes, false); //dst = NULL */
+
+	/* if (!ctx->tx_desc) { */
+		
+	/* 	dev_err(crc_mgr->dev, "%s: Failed to add data chunk.\n", __func__); */
+	/* 	return -ENOMEM; */
+	/* } */
+
+	ctx->tx_desc = s805_scatterwalk (req->src, req->src, ctx->init_nfo, ctx->tx_desc, req->nbytes, last); //dst = NULL
 
 	if (!ctx->tx_desc) {
 		
@@ -209,7 +283,7 @@ static int s805_crc_init_ctx (struct ahash_request *req) {
 
 	if (!IS_ALIGNED(req->nbytes, S805_CRC_BLOCK_SIZE)) {
 		
-		dev_err(crc_mgr->dev, "%s: Unaligned byte count (%u).\n", __func__, req->nbytes);
+	    crypto_ahash_set_flags(crypto_ahash_reqtfm(req), CRYPTO_TFM_RES_BAD_BLOCK_LEN);
 		return -EINVAL;
 		
 	}
@@ -219,7 +293,7 @@ static int s805_crc_init_ctx (struct ahash_request *req) {
 	else if (ctx->finalized)
 		ctx->finalized = false;
 	
-	ctx->tx_desc = dmaengine_prep_dma_interrupt (&crc_mgr->chan->vc.chan, 0); //S805_DMA_CRYPTO_FLAG
+	ctx->tx_desc = dmaengine_prep_dma_interrupt (&crc_mgr->chan->vc.chan, S805_DMA_CRYPTO_FLAG | S805_DMA_CRYPTO_CRC_FLAG); //S805_DMA_CRYPTO_FLAG : Won't free the descriptor table !!
 
 	if (!ctx->tx_desc) {
 		
@@ -230,9 +304,13 @@ static int s805_crc_init_ctx (struct ahash_request *req) {
 	ctx->tx_desc->callback = (void *) &s805_crc_handle_completion;
 	ctx->tx_desc->callback_param = (void *) req;
 
-	ctx->init_nfo = kzalloc(sizeof(s805_init_desc), GFP_NOWAIT); /* Must we allow atomic context here? */
+	ctx->init_nfo = kzalloc(sizeof(s805_init_desc),
+							crypto_ahash_get_flags(crypto_ahash_reqtfm(req)) & CRYPTO_TFM_REQ_MAY_SLEEP
+							? GFP_KERNEL
+							: GFP_NOWAIT);
 
 	if (!ctx->init_nfo) {
+		
 	    dev_err(crc_mgr->dev, "%s: Failed to allocate initialization info structure.\n", __func__);
 		return -ENOMEM;
 	}
@@ -393,6 +471,22 @@ static struct ahash_alg crc_alg = {
 static irqreturn_t s805_crc_callback (int irq, void *data)
 {
 
+	/* Never got one! */
+	
+    struct s805_crc_mgr * m = data;
+
+	u32 result = RD(S805_CRC_CHECK_SUM);
+	
+	dev_warn(m->dev, "%s: %u.\n", __func__, result);
+	
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t s805_parser_callback (int irq, void *data)
+{
+
+	/* Must be set ~0U in dest addresses??, is that the same parser ... ¿? */
+	
     struct s805_crc_mgr * m = data;
 
 	u32 result = RD(S805_CRC_CHECK_SUM);
@@ -404,15 +498,21 @@ static irqreturn_t s805_crc_callback (int irq, void *data)
 
 static int s805_crc_hw_enable ( void ) {
 
-	u32 status = RD(S805_DMA_CLK);
-	WR(status | S805_CRC_ENABLE, S805_DMA_CLK);
+	u32 status;// = RD(S805_DMA_CLK);
+	WR(/* status | S805_CRC_ENABLE */~0U, S805_DMA_CLK);
 
 	status = RD(S805_CRC_AIU_CLK_GATE);
 	WR(status | S805_CRC_ENABLE_CLK, S805_CRC_AIU_CLK_GATE);
 
 	status = RD(S805_CRC_CLK81);
 	WR(status | S805_CRC_ENABLE_CLK81, S805_CRC_CLK81);
-	           
+
+	status = RD(S805_CRC_IRQ_MASK);
+	WR(status | S805_CRC_IRQ_BITS, S805_CRC_IRQ_MASK);
+	
+	if (request_irq(S805_CRC_PARSER_IRQ, s805_parser_callback, 0, "s805_parser_irq", crc_mgr))
+		return -1;
+			
 	return request_irq(S805_CRC_IRQ, s805_crc_callback, 0, "s805_crc_irq", crc_mgr);
 }
 
@@ -483,6 +583,7 @@ static int s805_crc_remove(struct platform_device *pdev)
 	crypto_unregister_ahash(&crc_alg);
 	dma_release_channel ( &crc_mgr->chan->vc.chan );
 	free_irq(S805_CRC_IRQ, crc_mgr);
+	free_irq(S805_CRC_PARSER_IRQ, crc_mgr);
 	kfree(crc_mgr);
 	
 	return 0;

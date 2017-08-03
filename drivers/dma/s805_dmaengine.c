@@ -127,8 +127,7 @@ static s805_dtable * add_zeroed_tdesc (struct s805_desc * d)
 	s805_dtable * desc_tbl = kzalloc(sizeof(s805_dtable), GFP_NOWAIT);
 
 	/* Ensure that the last descriptor will interrupt us. */
-	if (!d->is_crypto)
-		list_last_entry (&d->desc_list, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
+	list_last_entry (&d->desc_list, s805_dtable, elem)->table->control |= S805_DTBL_IRQ;
 	
 	if (!desc_tbl) 
 	    return NULL;
@@ -1390,7 +1389,8 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 	d->c = c;
 	d->frames = 0;
 	INIT_LIST_HEAD(&d->desc_list);
-
+	s805_dma_set_cyclic(d);
+	
 	cursor = root;
 
 	spin_lock(&d->c->vc.lock);
@@ -1447,6 +1447,7 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 			d->c = c;
 			d->frames = 0;
 			INIT_LIST_HEAD(&d->desc_list);
+			s805_dma_set_cyclic(d);
 			
 			cursor->next = d;
 			cursor->root = root; 
@@ -1830,9 +1831,7 @@ s805_dma_prep_interrupt (struct dma_chan *chan,
 		return NULL;
 	
 	d->c = to_s805_dma_chan(chan);
-	
-	if (flags & S805_DMA_CRYPTO_FLAG)
-		d->is_crypto = true;
+	s805_dma_set_flags(d, flags);
 	
 	INIT_LIST_HEAD(&d->desc_list);
 	
@@ -1908,15 +1907,15 @@ static void s805_dma_desc_free(struct virt_dma_desc *vd)
 	struct s805_desc * aux, *cursor, * me = to_s805_dma_desc(&vd->tx);
 	struct s805_chan * c = me->c;
 	s805_dtable * desc_tbl, * temp;	
-	bool cyclic = false;
+	//bool cyclic = false;
 
 	/* while(!spin_trylock(&c->vc.lock)) */
 	/* 	cpu_relax(); */
 	
-	if (me->next) {
+	if (s805_desc_is_cyclic(me)) {
 		
-		tasklet_disable(&c->vc.task); 
-		cyclic = true;
+		/* tasklet_disable(&c->vc.task);  */
+		/* cyclic = true; */
 		
 		cursor = me->next;
 
@@ -1962,8 +1961,8 @@ static void s805_dma_desc_free(struct virt_dma_desc *vd)
 	if (!c->pending)
 		c->status = S805_DMA_SUCCESS;
 	
-	if (cyclic)
-		tasklet_enable(&c->vc.task);
+	/* if (cyclic) */
+	/* 	tasklet_enable(&c->vc.task); */
 }
 
 /**
@@ -2165,7 +2164,7 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 			
 			if (d->c->status != S805_DMA_PAUSED && d->c->status != S805_DMA_TERMINATED) {
 				
-				if (d->next) {
+				if (s805_desc_is_cyclic(d)) {
 					
 					if (!mgr->cyclic_busy) {
 						
@@ -2173,7 +2172,20 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 						break;
 						
 					} else
-						goto next;	
+						goto next;
+					
+#if defined CRYPTO_DEV_S805_TDES && defined CRYPTO_DEV_S805_AES
+					
+				} else if (s805_desc_is_crypto_cipher(d)) {
+
+					if (!mgr->cipher_busy) {
+						
+						mgr->cipher_busy = true;
+						break;
+						
+					} else
+						goto next;
+#endif
 				} else
 					break;
 				
@@ -2189,8 +2201,12 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 				
 				if (aux->c->status == S805_DMA_TERMINATED) {
 
+					if (s805_desc_is_cyclic(aux) && mgr->cyclic_busy) 
+						mgr->cyclic_busy = false;
+					
 					list_del(&aux->elem);
 					s805_dma_desc_free(&aux->vd);
+					
 				}
 			}			
 		}
@@ -2211,20 +2227,20 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 		    mgr->busy = true;
 		} 
 	}
-	
-#ifdef CONFIG_S805_DMAC_TO
-	if (mgr->busy)
-		s805_dma_to_start(S805_DMA_TIME_OUT);
-#endif
-	
+
+
 #ifndef CONFIG_S805_DMAC_SERIALIZE
 #ifdef CONFIG_S805_DMAC_TO
 	
-	/* Coming from timeout */
-	if (mgr->busy && mgr->thread_reset)
-		mgr->thread_reset --;
+	if (mgr->busy) {
+   
+		/* Coming from timeout */
+		if (mgr->thread_reset)
+			mgr->thread_reset --;
+
+	}
 	
-#endif
+#endif //TIME-OUT
 	
 	if ((mgr->max_thread != S805_DMA_MAX_THREAD) &&
 		(!mgr->thread_reset || list_empty(&mgr->scheduled))) {
@@ -2233,6 +2249,11 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 		mgr->max_thread = S805_DMA_MAX_THREAD;	
 	}
 	
+#endif //SERIALIZE
+
+	
+#ifdef CONFIG_S805_DMAC_TO
+	s805_dma_to_start(S805_DMA_TIME_OUT);
 #endif
 	
 	for (thread = 0; thread < thread_enable; thread ++) {
@@ -2305,7 +2326,7 @@ static void s805_dma_process_completed ( unsigned long null )
 
 				list_del(&d->elem);
 				
-				if (d->next) {
+				if (s805_desc_is_cyclic(d)) {
 					
 					/* Call cyclic callback. */
 					vchan_cyclic_callback(&d->root->vd);
@@ -2336,12 +2357,17 @@ static void s805_dma_process_completed ( unsigned long null )
 				} else {
 
 					dev_dbg(d->c->vc.chan.device->dev, "Marking cookie %d completed for channel %s.\n", d->vd.tx.cookie, dma_chan_name(&d->c->vc.chan));
+
+				    if (!s805_desc_is_crypto_crc(d)) {
+
+						spin_lock(&d->c->vc.lock);
 					
-					spin_lock(&d->c->vc.lock);
+						vchan_cookie_complete(&d->vd);
 					
-					vchan_cookie_complete(&d->vd);
-					
-					spin_unlock(&d->c->vc.lock);
+						spin_unlock(&d->c->vc.lock);
+
+					} else 
+						d->vd.tx.callback(d->vd.tx.callback_param); /* !!! Won't free the descriptor, temporal until CRC irq is received.*/
 				}
 				
 			} else {
@@ -2375,7 +2401,7 @@ static void s805_dma_process_completed ( unsigned long null )
 			
 			dev_dbg(d->c->vc.chan.device->dev, "Terminating transaction %d for channel %s.\n", d->vd.tx.cookie, dma_chan_name(&d->c->vc.chan));
 
-			if (d->next)
+			if (s805_desc_is_cyclic(d))
 				mgr->cyclic_busy = false;
 			
 			list_del(&d->elem);
@@ -2606,7 +2632,7 @@ static u32 get_residue (struct s805_desc * me) {
 	u32 residue = 0;
 
 	/* Cyclic transfer*/
-	if (me->next) {
+	if (s805_desc_is_cyclic(me)) {
 
 		cursor = me->next;
 		

@@ -42,8 +42,11 @@ struct s805_dmadev
 	
 	struct tasklet_struct tasklet_completed;  /* Tasklet for bh processing of interrupts. */
 
-#ifdef CONFIG_S805_DMAC_TO
+#ifdef CONFIG_S805_DMAC_TO 
 	bool timer_busy;
+#endif
+#if defined CRYPTO_DEV_S805_TDES && defined CRYPTO_DEV_S805_AES
+	bool cipher_busy;
 #endif
 	bool cyclic_busy;
 	bool busy;
@@ -102,7 +105,9 @@ struct s805_desc {
 
 	/* For crypto requests */
 	uint byte_count;
-	bool is_crypto;
+
+	/* Identifiers */
+	unsigned long flags;
 	
 };
 

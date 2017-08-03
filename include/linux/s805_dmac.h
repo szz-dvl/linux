@@ -62,7 +62,9 @@ struct s805_desc {
 
 	/* For crypto requests */
 	uint byte_count;
-	bool is_crypto;
+
+	/* Identifiers */
+	unsigned long flags;
 };
 
 #endif
@@ -75,8 +77,55 @@ struct s805_desc {
 #define S805_DTBL_SRC_HOLD               BIT(26) 
 #define S805_DTBL_DST_HOLD               BIT(25)
 #define S805_DMA_CLK                     P_HHI_GCLK_MPEG1
-#define S805_DMA_CRYPTO_FLAG             BIT(10)
 
+/* dma interface flags ends at bit 9 */
+enum s805_dmac_flags {
+	
+    S805_DMA_CRYPTO_FLAG = BIT(10),
+	S805_DMA_CRYPTO_AES_FLAG = BIT(11),
+	S805_DMA_CRYPTO_TDES_FLAG = BIT(12),
+	S805_DMA_CRYPTO_CRC_FLAG = BIT(13),
+	S805_DMA_CRYPTO_DIVX_FLAG = BIT(14),
+	S805_DMA_CYCLIC_FLAG = BIT(15),
+	S805_DMA_PRIVATE_FLAGS = 0x0000FC00
+};
+
+static inline void s805_dma_set_flags (struct s805_desc * d, unsigned long flags) {
+	d->flags |= (flags & S805_DMA_PRIVATE_FLAGS);
+}
+
+static inline void s805_dma_set_cyclic (struct s805_desc * d) {
+    s805_dma_set_flags(d, S805_DMA_CYCLIC_FLAG);
+}
+
+static inline bool s805_desc_is_crypto (struct s805_desc * d) {
+	return (d->flags & S805_DMA_CRYPTO_FLAG);
+}
+
+static inline bool s805_desc_is_crypto_aes (struct s805_desc * d) {
+	return s805_desc_is_crypto(d) && (d->flags & S805_DMA_CRYPTO_AES_FLAG);
+}
+
+static inline bool s805_desc_is_crypto_tdes (struct s805_desc * d) {
+	return s805_desc_is_crypto(d) && (d->flags & S805_DMA_CRYPTO_TDES_FLAG);
+}
+
+static inline bool s805_desc_is_crypto_cipher (struct s805_desc * d) {
+	return s805_desc_is_crypto_tdes(d) || s805_desc_is_crypto_aes(d);
+}
+
+static inline bool s805_desc_is_crypto_crc (struct s805_desc * d) {
+	return s805_desc_is_crypto(d) && (d->flags & S805_DMA_CRYPTO_CRC_FLAG);
+}
+
+static inline bool s805_desc_is_crypto_divx (struct s805_desc * d) {
+	return s805_desc_is_crypto(d) && (d->flags & S805_DMA_CRYPTO_DIVX_FLAG);
+}
+
+static inline bool s805_desc_is_cyclic (struct s805_desc * d) {
+	return (d->flags & S805_DMA_CYCLIC_FLAG);
+}
+	
 typedef enum s805_dma_status {
 	S805_DMA_SUCCESS,
 	S805_DMA_IN_PROGRESS,
