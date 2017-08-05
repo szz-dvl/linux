@@ -34,7 +34,9 @@ static inline void s805_dma_hard_reset ( void ) {
 	status &= ~S805_DMA_DMA_PM;
 	status |= S805_DMA_ENABLE;
 	
-	WR(status, S805_DMA_CTRL);	
+	WR(status, S805_DMA_CTRL);
+
+	WR(S805_DMA_FIRQ_BIT, S805_DMA_FIRQ_SEL);
 }
 
 /**
@@ -94,7 +96,7 @@ static irqreturn_t s805_dma_to_callback (int irq, void *data)
 	
 	if (m->busy) {
 		
-	    dev_warn(m->ddev.dev, "Transaction timed out, reseting device.\n");
+	    dev_warn(m->ddev.dev, "Transaction timed out (%u), reseting device.\n", m->__pending);
 		
 		s805_dma_hard_reset();
 		

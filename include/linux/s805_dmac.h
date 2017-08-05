@@ -90,6 +90,15 @@ enum s805_dmac_flags {
 	S805_DMA_PRIVATE_FLAGS = 0x0000FC00
 };
 
+typedef enum desc_types {
+    BLKMV_DESC = 0,
+    CYCLIC_DESC = S805_DMA_CYCLIC_FLAG,
+	AES_DESC = S805_DMA_CRYPTO_FLAG | S805_DMA_CRYPTO_AES_FLAG,
+    TDES_DESC = S805_DMA_CRYPTO_FLAG | S805_DMA_CRYPTO_TDES_FLAG,
+	CRC_DESC = S805_DMA_CRYPTO_FLAG | S805_DMA_CRYPTO_CRC_FLAG,
+	DIVX_DESC = S805_DMA_CRYPTO_FLAG | S805_DMA_CRYPTO_DIVX_FLAG,
+} s805_desc_type;
+
 static inline void s805_dma_set_flags (struct s805_desc * d, unsigned long flags) {
 	d->flags |= (flags & S805_DMA_PRIVATE_FLAGS);
 }
@@ -100,6 +109,14 @@ static inline void s805_dma_set_cyclic (struct s805_desc * d) {
 
 static inline bool s805_desc_is_crypto (struct s805_desc * d) {
 	return (d->flags & S805_DMA_CRYPTO_FLAG);
+}
+
+static inline bool s805_desc_is_blkmv (struct s805_desc * d) {
+	return !s805_desc_is_crypto(d);
+}
+
+static inline bool s805_desc_is_cyclic (struct s805_desc * d) {
+	return s805_desc_is_blkmv(d) && (d->flags & S805_DMA_CYCLIC_FLAG);
 }
 
 static inline bool s805_desc_is_crypto_aes (struct s805_desc * d) {
@@ -122,9 +139,11 @@ static inline bool s805_desc_is_crypto_divx (struct s805_desc * d) {
 	return s805_desc_is_crypto(d) && (d->flags & S805_DMA_CRYPTO_DIVX_FLAG);
 }
 
-static inline bool s805_desc_is_cyclic (struct s805_desc * d) {
-	return (d->flags & S805_DMA_CYCLIC_FLAG);
+static inline unsigned long s805_desc_get_type (struct s805_desc * d) {
+	return (d->flags & S805_DMA_PRIVATE_FLAGS);
 }
+
+
 	
 typedef enum s805_dma_status {
 	S805_DMA_SUCCESS,
@@ -160,14 +179,6 @@ typedef enum inline_types {
 	INLINE_CRC,
 	INLINE_AES
 } s805_dma_tr_type;
-
-typedef enum desc_types {
-    BLKMV_DESC,
-    AES_DESC,
-    TDES_DESC,
-	CRC_DESC,
-	DIVX_DESC
-} s805_desc_type;
 
 /* S805 Datasheet p.58 */
 typedef enum endian_types {

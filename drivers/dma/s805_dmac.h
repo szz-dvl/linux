@@ -3,6 +3,7 @@
 #include <linux/dmaengine.h>
 #include <linux/interrupt.h>
 #include "virt-dma.h"
+#include <../arch/arm/include/asm/fiq.h>
 
 #define WR(data, addr)  *(volatile unsigned long *)(addr)=data
 #define RD(addr)        *(volatile unsigned long *)(addr)
@@ -19,7 +20,14 @@
 
 #define S805_DMA_MAX_HW_THREAD           4
 
+#define S805_DMA_FIRQ_SEL                P_MEDIA_CPU_INTR_FIRQ_SEL
+#define S805_DMA_FIRQ_BIT                BIT(12)     
+
 #define __S805_DMAC
+
+#if defined CONFIG_CRYPTO_DEV_S805_TDES && defined CONFIG_CRYPTO_DEV_S805_AES
+#define S805_CRYPTO_CIPHER               1
+#endif
 
 struct s805_dmadev 
 {
@@ -45,11 +53,14 @@ struct s805_dmadev
 #ifdef CONFIG_S805_DMAC_TO 
 	bool timer_busy;
 #endif
-#if defined CRYPTO_DEV_S805_TDES && defined CRYPTO_DEV_S805_AES
+#ifdef S805_CRYPTO_CIPHER
 	bool cipher_busy;
 #endif
 	bool cyclic_busy;
 	bool busy;
+
+	u8 __pending;
+	struct fiq_handler fiq;
 };
 
 /* S805 Datasheet p.57 */

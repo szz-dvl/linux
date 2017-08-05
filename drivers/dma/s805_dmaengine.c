@@ -12,6 +12,7 @@
 #include <linux/of.h>
 #include <linux/delay.h>
 #include <linux/preempt.h>
+#include <asm/mach/irq.h>
 
 #include "s805_dmac.h"
 #include <linux/s805_dmac.h>
@@ -65,7 +66,6 @@ struct memset_info {
 
 };
 
-//d->memset->value
 /**
  * struct sg_info - Auxiliar structure to iterate sg lists.
  * 
@@ -111,6 +111,8 @@ static const struct of_device_id s805_dma_of_match[] =
 		{},
 	};
 MODULE_DEVICE_TABLE(of, s805_dma_of_match);
+
+extern char __fiq_handler_str[], __fiq_handler_end[];
 
 /**
  * add_zeroed_tdesc - This will set the control bit S805_DTBL_IRQ for the last 
@@ -304,16 +306,15 @@ static s805_dtable * sg_move_along (s805_dtable * chunk, struct s805_desc *d) {
  * Notice that for each possible type, those defined in "linux/s805_dmac.h", it will be a
  * public function available, prototypes for those will be found in the same file.
  *
- * @chunk: The data chunk to be stored in the descriptor list.
- * @init_nfo: Struct holding the needed information for a particular chunck initialisation
- * aswell as the pointer to the descriptor holding the target list.
+ * @d: Descriptor holding the list of chunks.
+ * @chunk: The data chunk to be stored in the descriptor list, may be %NULL.
+ * @init_nfo: Struct holding the needed information for a particular chunck initialisation,
+ * may be %NULL.
  *
  */
-static s805_dtable * sg_init_desc (s805_dtable * chunk, s805_init_desc * init_nfo) {
+static s805_dtable * sg_init_desc (struct s805_desc *d, s805_dtable * chunk, s805_init_desc * init_nfo) {
 
-	switch(init_nfo->type) {
-	case BLKMV_DESC:
-		return sg_move_along (chunk, init_nfo->d);
+	switch(s805_desc_get_type(d)) {
 #ifdef CONFIG_CRYPTO_DEV_S805_AES
 	case AES_DESC:
 		return sg_aes_move_along (chunk, init_nfo);
@@ -331,7 +332,7 @@ static s805_dtable * sg_init_desc (s805_dtable * chunk, s805_init_desc * init_nf
 		return sg_divx_move_along (chunk, init_nfo);
 #endif
 	default:
-		return NULL;
+		return sg_move_along (chunk, d);
 	}
 }
 
@@ -394,12 +395,15 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 	bool new_block, src_completed;
 	uint act_size, icg, burst, min_size;
 		
-	d = init_nfo->d = to_s805_dma_desc(tx_desc);
+	d = to_s805_dma_desc(tx_desc);
 	limit -= d->byte_count;
+
+	if (init_nfo)
+		init_nfo->d = d;
 	
 	spin_lock(&d->c->vc.lock);
 	
-	desc_tbl = sg_init_desc (NULL, init_nfo);
+	desc_tbl = sg_init_desc (d, NULL, init_nfo);
 	
 	/* Auxiliar struct to iterate the lists. */
 	src_info.cursor = src_sg;
@@ -432,7 +436,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 			if ((desc_tbl->table->count + act_size) > S805_MAX_TR_SIZE) {
 				
 				/* Be careful!! may break multiplicity of blocks, to be tested. (MAX values protecting us?) */
-				desc_tbl = sg_init_desc (desc_tbl, init_nfo);
+				desc_tbl = sg_init_desc (d, desc_tbl, init_nfo);
 				
 				if (!desc_tbl)
 					goto error_allocation;
@@ -536,7 +540,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 		
 		if (new_block) {
 			
-			desc_tbl = sg_init_desc (desc_tbl, init_nfo);
+			desc_tbl = sg_init_desc (d, desc_tbl, init_nfo);
 			
 			if (!desc_tbl)
 				goto error_allocation;
@@ -1504,10 +1508,8 @@ s805_dma_prep_sg (struct dma_chan *chan,
 				  struct scatterlist *src_sg, unsigned int src_nents,
 				  unsigned long flags)
 {
-	struct dma_async_tx_descriptor * tx_desc;
 	struct s805_desc *d;
 	struct s805_chan *c = to_s805_dma_chan(chan);
-	s805_init_desc * init_nfo;
 	struct scatterlist *aux;
 	int j, bytes = 0;
 	uint len;
@@ -1544,32 +1546,16 @@ s805_dma_prep_sg (struct dma_chan *chan,
 		return NULL;
 	}
 	
-	/* Allocate and setup the information for descriptor initialization */
-	init_nfo = kzalloc(sizeof(struct s805_desc), GFP_NOWAIT);
-	if (!init_nfo)
-		return NULL;
-
-	init_nfo->type = BLKMV_DESC;
-	
 	/* Allocate and setup the descriptor. */
     d = kzalloc(sizeof(struct s805_desc), GFP_NOWAIT);
-	if (!d) {
-		kfree(init_nfo);
+	if (!d)
 		return NULL;
-	}
 	
 	d->c = c;
 	d->frames = 0;
-
 	INIT_LIST_HEAD(&d->desc_list);
-
-	tx_desc = vchan_tx_prep(&c->vc, &d->vd, flags);
 	
-    tx_desc = s805_scatterwalk (src_sg, dst_sg, init_nfo, tx_desc, UINT_MAX, true);
-
-	kfree (init_nfo);
-
-	return tx_desc;
+    return s805_scatterwalk (src_sg, dst_sg, NULL, vchan_tx_prep(&c->vc, &d->vd, flags), UINT_MAX, true);
 }
 
 /**
@@ -1891,6 +1877,8 @@ static inline void s805_dma_enable_hw ( void ) {
 	
 	WR(status, S805_DMA_CTRL);
 
+	WR(S805_DMA_FIRQ_BIT, S805_DMA_FIRQ_SEL);
+	
 	for (i = 0; i < S805_DMA_MAX_HW_THREAD; i++)
 		s805_dma_thread_disable(i);
 	
@@ -2129,6 +2117,16 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 	}
 }
 
+/* static void s805_dma_setup_fiq (uint amount) { */
+
+/* 	struct pt_regs regs; */
+
+/* 	regs.ARM_r8 = (long) amount; */
+/* 	regs.ARM_r9 = (long) mgr; /\* ?? *\/ */
+
+/* 	set_fiq_regs(&regs); */
+/* } */
+
 /**
  * s805_dma_fetch_tr - Perform a batch of previously scheduled transactions, zero if none is available, 
  * at most %S805_DMA_MAX_HW_THREAD. General @mgr->lock held by callers.
@@ -2153,6 +2151,7 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 #endif
 	
 	mgr->busy = (ini_thread > 0);
+	mgr->__pending = ini_thread;
 	
 	for (thread = ini_thread; thread < mgr->max_thread; thread ++) {
 
@@ -2174,7 +2173,7 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 					} else
 						goto next;
 					
-#if defined CRYPTO_DEV_S805_TDES && defined CRYPTO_DEV_S805_AES
+#ifdef S805_CRYPTO_CIPHER
 					
 				} else if (s805_desc_is_crypto_cipher(d)) {
 
@@ -2225,6 +2224,7 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 			thread_mask |= (1 << thread);
 			
 		    mgr->busy = true;
+			mgr->__pending ++;
 		} 
 	}
 
@@ -2250,11 +2250,16 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 	}
 	
 #endif //SERIALIZE
-
+	
+	if (mgr->busy) {
+		
+		//s805_dma_setup_fiq(mgr->__pending);
 	
 #ifdef CONFIG_S805_DMAC_TO
-	s805_dma_to_start(S805_DMA_TIME_OUT);
+		s805_dma_to_start(S805_DMA_TIME_OUT);
 #endif
+
+	}
 	
 	for (thread = 0; thread < thread_enable; thread ++) {
 		
@@ -2316,13 +2321,13 @@ static void s805_dma_process_completed ( unsigned long null )
 		s805_dma_to_stop();
 #endif
 	
-	list_for_each_entry_safe (d, temp, &mgr->completed, elem) {
+	list_for_each_entry_safe (d, temp, &mgr->in_progress, elem) {
 		
 		/* All the transactions has been completed, process the finished descriptors.*/
 		
-		if (d->c->status != S805_DMA_TERMINATED) {
+		if (likely(d->c->status != S805_DMA_TERMINATED)) {
 			
-			if (!d->next_chunk) {
+			if (likely(!d->next_chunk)) {
 
 				list_del(&d->elem);
 				
@@ -2360,6 +2365,11 @@ static void s805_dma_process_completed ( unsigned long null )
 
 				    if (!s805_desc_is_crypto_crc(d)) {
 
+#ifdef S805_CRYPTO_CIPHER
+						
+						if (s805_desc_is_crypto_cipher(d))
+							mgr->cipher_busy = false;
+#endif
 						spin_lock(&d->c->vc.lock);
 					
 						vchan_cookie_complete(&d->vd);
@@ -2424,25 +2434,36 @@ static void s805_dma_process_completed ( unsigned long null )
  * @data: Pointer to @mgr.
  *
  */
-static irqreturn_t s805_dma_callback (int irq, void *data)
+
+/* hot, naked attribute */
+
+void __attribute__ ((isr)) s805_dma_callback (void)
 {
-
-	struct s805_dmadev *m = data;
-	
-	preempt_disable();
-
-	list_move_tail (&list_first_entry(&m->in_progress,
- 									  s805_dtable,
- 									  elem)->elem,
- 					&m->completed);
-
-	if (list_empty(&m->in_progress))
-		tasklet_hi_schedule(&m->tasklet_completed);
-	
-	preempt_enable();
-	
-	return IRQ_HANDLED;
+    register struct s805_dmadev * m asm ("r8"); /* Pointer to mgr device. */
+	--m->__pending;
 }
+/* static inline void isr_addr_offset(void){	 */
+/* }; */
+
+/* static irqreturn_t s805_dma_callback (int irq, void *data) */
+/* { */
+
+/* 	struct s805_dmadev *m = data; */
+	
+/* 	preempt_disable(); */
+
+/* 	list_move_tail (&list_first_entry(&m->in_progress, */
+/*  									  s805_dtable, */
+/*  									  elem)->elem, */
+/*  					&m->completed); */
+
+/* 	if (list_empty(&m->in_progress)) */
+/* 		tasklet_hi_schedule(&m->tasklet_completed); */
+	
+/* 	preempt_enable(); */
+	
+/* 	return IRQ_HANDLED; */
+/* } */
 
 /**
  * s805_dma_dismiss_chann - Dismiss all scheduled transactions for a channel. Protected by @mgr->lock. 
@@ -2786,6 +2807,23 @@ static int s805_dma_chan_init (struct s805_dmadev *m)
 	return 0;
 }
 
+static int fiq_op(void *ref, int relinquish)
+{
+	struct pt_regs regs = (struct pt_regs) { 0 };
+	
+	if (relinquish) {
+
+		set_fiq_handler(s805_dma_callback, 24); //abs(((unsigned long)isr_addr_offset - (unsigned long)s805_dma_callback))
+
+		regs.ARM_r8 = (long) mgr; //ref
+		//regs.ARM_r9 = (long) printk;
+		set_fiq_regs(&regs);
+		
+	}
+
+	return 0;
+}
+
 /**
  * s805_dmamgr_probe - Allocate the global structures that will hold s805 DMAC manager information.
  *
@@ -2793,7 +2831,10 @@ static int s805_dma_chan_init (struct s805_dmadev *m)
  *
  */
 static int s805_dmamgr_probe(struct platform_device *pdev)
-{	
+{
+	struct pt_regs regs = (struct pt_regs) { 0 };
+	struct pt_regs regs_in = (struct pt_regs) { 0 };
+	
 	mgr = devm_kzalloc(&pdev->dev, sizeof(struct s805_dmadev), GFP_KERNEL);
 	if (!mgr)
 		return -ENOMEM;
@@ -2812,8 +2853,6 @@ static int s805_dmamgr_probe(struct platform_device *pdev)
 	
 	mgr->tasklet_completed = (struct tasklet_struct) { NULL, 0, ATOMIC_INIT(0), s805_dma_process_completed, 0 };
 	
-	dev_info(&pdev->dev, "DMA legacy API manager at 0x%p\n", mgr);
-	
 	mgr->irq_number = S805_DMA_IRQ;
 	mgr->max_thread = S805_DMA_MAX_THREAD;
 	
@@ -2821,8 +2860,31 @@ static int s805_dmamgr_probe(struct platform_device *pdev)
 	if (s805_dma_to_init())
 		return -1;
 #endif
+
+	//return request_irq(mgr->irq_number, s805_dma_callback, 0, "s805_dmaengine_irq", mgr);
 	
-	return request_irq(mgr->irq_number, s805_dma_callback, 0, "s805_dmaengine_irq", mgr);
+	mgr->fiq.name = "s805_dmaengine_irq";
+	mgr->fiq.fiq_op = fiq_op;
+	mgr->fiq.dev_id = mgr;
+	
+	if (claim_fiq(&mgr->fiq))
+		return -1;
+
+	set_fiq_handler(s805_dma_callback, 24); //abs(((unsigned long)isr_addr_offset - (unsigned long)s805_dma_callback))
+
+	print_hex_dump_bytes("DMA mgr FIQ handler: ", DUMP_PREFIX_ADDRESS, s805_dma_callback, 24);
+	
+	regs.ARM_r8 = (long) &mgr->__pending;
+	regs.ARM_r9 = (long) mgr;
+	set_fiq_regs(&regs);
+	
+	enable_fiq(mgr->irq_number);
+	
+	get_fiq_regs(&regs_in);
+	
+	dev_info(&pdev->dev, "DMA legacy API manager at 0x%p, (%p) [%p, %p]\n", mgr, s805_dma_callback, &mgr->__pending, (unsigned int *) regs_in.ARM_r8);
+
+	return 0;
 }
 
 
@@ -2844,7 +2906,9 @@ static void s805_dma_free(struct s805_dmadev *m)
 		tasklet_kill(&c->vc.task);
 	}
 
-	free_irq(m->irq_number, m);
+	disable_fiq(m->irq_number);
+	release_fiq(&m->fiq);
+	//free_irq(m->irq_number, m);
 	
 #ifdef CONFIG_S805_DMAC_TO
 	s805_dma_to_shutdown();
@@ -3003,12 +3067,13 @@ static struct platform_driver s805_dma_driver = {
 	},
 };
 
-static int s805_init(void)
+static int __init s805_init(void)
 {
+	init_FIQ(0);
 	return platform_driver_register(&s805_dma_driver);
 }
 
-static void s805_exit(void)
+static void __exit s805_exit(void)
 {
 	platform_driver_unregister(&s805_dma_driver);
 }
