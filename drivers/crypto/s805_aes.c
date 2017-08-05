@@ -4,7 +4,7 @@
 #include <crypto/aes.h>
 #include <crypto/skcipher.h>
 #include <linux/s805_dmac.h>
-#include <linux/s805_crypto.h>
+#include "s805_crypto.h"
 
 /* Registers & Bitmaps for the s805 DMAC AES algorithm. */
 
@@ -28,6 +28,25 @@
 #define S805_DTBL_AES_DIR(dir)                ((dir & 0x1) << 10)
 #define S805_DTBL_AES_RESET_IV(restr)         ((restr & 0x1) << 11)
 #define S805_DTBL_AES_MODE(mode)              ((mode & 0x3) << 12)
+
+typedef enum aes_key_type {
+	AES_KEY_TYPE_128,
+	AES_KEY_TYPE_192,
+	AES_KEY_TYPE_256,
+	AES_KEY_TYPE_RESERVED,
+} s805_aes_key_type;
+
+typedef enum aes_mode {
+	AES_MODE_ECB,
+    AES_MODE_CBC,
+	AES_MODE_CTR,
+	AES_MODE_RESERVED,
+} s805_aes_mode;
+
+typedef enum aes_dir {
+	AES_DIR_DECRYPT,
+    AES_DIR_ENCRYPT
+} s805_aes_dir;
 
 struct s805_aes_mgr {
 
@@ -53,8 +72,9 @@ struct s805_aes_ctx {
 struct s805_aes_reqctx {
 
     struct dma_async_tx_descriptor * tx_desc;
+	s805_aes_key_type type;
 	s805_aes_mode mode;
-	/* s805_aes_dir dir; */
+	s805_aes_dir dir;
 	
 	struct list_head elem;
 };
@@ -115,14 +135,17 @@ static s805_dtable * def_init_aes_tdesc (unsigned int frames, s805_aes_key_type 
 	
 }
 
-s805_dtable * sg_aes_move_along (s805_dtable * cursor, s805_init_desc * init_nfo) {
+s805_dtable * sg_aes_move_along (struct s805_desc * d, s805_dtable * cursor) {
 
+	struct s805_aes_reqctx *rctx = ablkcipher_request_ctx((struct ablkcipher_request *) d->req);
+	
 	if (cursor) {
-		list_add_tail(&cursor->elem, &init_nfo->d->desc_list);
- 		init_nfo->d->frames ++;
+		
+		list_add_tail(&cursor->elem, &d->desc_list);
+ 	    d->frames ++;
 	}
 	
-	return def_init_aes_tdesc(init_nfo->d->frames, init_nfo->aes_nfo.type, init_nfo->aes_nfo.mode, init_nfo->aes_nfo.dir);
+	return def_init_aes_tdesc(d->frames, rctx->type, rctx->mode, rctx->dir);
 	
 }
 
@@ -322,10 +345,10 @@ static void s805_aes_crypt_handle_completion (void * req_ptr) {
 	list_del(&job->elem);
 	spin_unlock(&aes_mgr->lock);
 
+	req->base.complete(&req->base, 0);
+	
 	job = list_first_entry_or_null (&aes_mgr->jobs, struct s805_aes_reqctx, elem);
 	
-	req->base.complete(&req->base, 0);
-    
 	if (job)  
 		s805_aes_crypt_launch_job(to_ablkcipher_request(job), true);
 	else {
@@ -370,7 +393,6 @@ static int s805_aes_crypt_prep (struct ablkcipher_request * req, s805_aes_mode m
 	struct s805_aes_ctx *ctx = crypto_ablkcipher_ctx(crypto_ablkcipher_reqtfm(req));
 	struct s805_aes_reqctx *rctx = ablkcipher_request_ctx(req);
 	struct scatterlist * aux;
-	s805_init_desc * init_nfo;
 	int keytype;
 	int len, ret, j = 0;
 
@@ -388,43 +410,29 @@ static int s805_aes_crypt_prep (struct ablkcipher_request * req, s805_aes_mode m
 	    crypto_ablkcipher_set_flags(crypto_ablkcipher_reqtfm(req), CRYPTO_TFM_RES_BAD_BLOCK_LEN);
 		return -EINVAL;
 	}
-	
-	/* Allocate and setup the information for descriptor initialization */
-	init_nfo = kzalloc(sizeof(s805_init_desc),
-					   crypto_ablkcipher_get_flags(crypto_ablkcipher_reqtfm(req)) & CRYPTO_TFM_REQ_MAY_SLEEP
-					   ? GFP_KERNEL
-					   : GFP_NOWAIT);
-
-	if (!init_nfo) {
-	    dev_err(aes_mgr->dev, "%s: Failed to allocate initialization info structure.\n", __func__);
-		return -ENOMEM;
-	}
 
 	keytype = s805_aes_crypt_get_key_type (ctx->keylen);
 
 	if (keytype < 0) {
 		
 		crypto_ablkcipher_set_flags(crypto_ablkcipher_reqtfm(req), CRYPTO_TFM_RES_BAD_KEY_LEN);
-		kfree(init_nfo);
 		return keytype;
 		
 	}
 	
-	init_nfo->type = AES_DESC;
-	init_nfo->aes_nfo.type = keytype; 
-	init_nfo->aes_nfo.mode = mode;
-	init_nfo->aes_nfo.dir = dir;
-
+    rctx->type = keytype; 
+	rctx->mode = mode;
+	rctx->dir = dir;
+	
 	aux = req->src;
 	
 	while (aux) {
-
+		
 		len = sg_dma_len(aux);
 		
 		if (!IS_ALIGNED(len, AES_BLOCK_SIZE)) {
 			
 			crypto_ablkcipher_set_flags(crypto_ablkcipher_reqtfm(req), CRYPTO_TFM_RES_BAD_BLOCK_LEN);
-			kfree(init_nfo);
 			return -EINVAL;
 		}
 		
@@ -437,23 +445,19 @@ static int s805_aes_crypt_prep (struct ablkcipher_request * req, s805_aes_mode m
 	if (!rctx->tx_desc) {
 		
 		dev_err(aes_mgr->dev, "%s: Failed to allocate dma descriptor.\n", __func__);
-		kfree(init_nfo);
 		return -ENOMEM;
 	}
 
-	rctx->tx_desc = s805_scatterwalk (req->src, req->dst, init_nfo, rctx->tx_desc, req->nbytes, true);
+	s805_crypto_set_req(rctx->tx_desc, req);
+	
+	rctx->tx_desc = s805_scatterwalk (req->src, req->dst, rctx->tx_desc, req->nbytes, true);
 	
 	if (!rctx->tx_desc) {
 		
 		dev_err(aes_mgr->dev, "%s: Failed to allocate dma descriptors.\n", __func__);
-		kfree(init_nfo);
 		return -ENOMEM;
 	}
 	
-	kfree(init_nfo);
-
-	//rctx->dir = dir;
-	rctx->mode = mode;
 	rctx->tx_desc->callback = (void *) &s805_aes_crypt_handle_completion;
 	rctx->tx_desc->callback_param = (void *) req;
 	

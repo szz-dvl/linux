@@ -3,10 +3,7 @@
 #include <linux/dmaengine.h>
 #include <linux/interrupt.h>
 #include "virt-dma.h"
-#include <../arch/arm/include/asm/fiq.h>
-
-#define WR(data, addr)  *(volatile unsigned long *)(addr)=data
-#define RD(addr)        *(volatile unsigned long *)(addr)
+#include "s805_shared.h"
 
 #define S805_DMA_CTRL                    P_NDMA_CNTL_REG0
 #define S805_DMA_ENABLE                  BIT(14)                 /* Both CTRL and CLK resides in the same bit */
@@ -15,7 +12,7 @@
 #ifdef CONFIG_S805_DMAC_TO
 #define S805_DMA_TIME_OUT                CONFIG_S805_DMAC_TO_VAL  /* ms */
 #else
-#define S805_DMA_TIME_OUT                150  /* Used in terminate channel and channel release, for busy waiting a channel to free its pending transactions. */
+#define S805_DMA_TIME_OUT                150                      /* Used in terminate channel and channel release, for busy waiting a channel to free its pending transactions. */
 #endif
 
 #define S805_DMA_MAX_HW_THREAD           4
@@ -46,7 +43,6 @@ struct s805_dmadev
 	
 	struct list_head scheduled;               /* List of descriptors currently scheduled. */
 	struct list_head in_progress;             /* List of descriptors in progress. */
-	struct list_head completed;               /* List of descriptors completed. */
 	
 	struct tasklet_struct tasklet_completed;  /* Tasklet for bh processing of interrupts. */
 
@@ -60,66 +56,6 @@ struct s805_dmadev
 	bool busy;
 
 	u8 __pending;
-	struct fiq_handler fiq;
-};
-
-/* S805 Datasheet p.57 */
-struct s805_table_desc 
-{
-	u32 control;        /* entry 0 */
-	u32 src;            /* entry 1 */
-	u32 dst;            /* entry 2 */
-	u32 count;          /* entry 3 */
-	
-	/* 2D Move */
-	u16 src_burst;      /* entry 4 [15:0]  */
-	u16 src_skip;       /* entry 4 [31:16] */
-	
-	u16 dst_burst;      /* entry 5 [15:0]  */
-	u16 dst_skip;       /* entry 5 [31:16] */
-	
-	
-	/* Crypto engine */
-	u32 crypto;         /* entry 6 */
-	
-} __attribute__ ((aligned (32)));
-
-typedef struct s805_table_desc_entry {
-
-	struct list_head elem;
-	struct s805_table_desc * table;
-	dma_addr_t paddr;
-
-} s805_dtable;
-
-struct s805_desc {
-	
-	struct s805_chan *c;
-	struct virt_dma_desc vd;
-	struct list_head elem;
-	
-	/* List of table descriptors holding the information of the trasaction */
-	struct list_head desc_list;
-	
-	/* Descriptors pending of process */
-	unsigned int frames;
-
-	/* Struct to store the information for memset source value */
-	struct memset_info * memset;
-
-	/* For transactions with more than S805_DMA_MAX_DESC data chunks. */
-	s805_dtable * next_chunk;
-
-	/* For cyclic transfers */
-	struct s805_desc * next;
-	struct s805_desc * root;
-
-	/* For crypto requests */
-	uint byte_count;
-
-	/* Identifiers */
-	unsigned long flags;
-	
 };
 
 #ifdef CONFIG_S805_DMAC_TO

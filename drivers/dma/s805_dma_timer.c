@@ -23,9 +23,9 @@
  *
  */
 static inline void s805_dma_hard_reset ( void ) {
-
+	
 	u32 status;
-		
+	
 	WR(S805_DMA_RESET, S805_DMA_RESET_REG);
 	WR(1, S805_DMA_RESET_CNT);
 	
@@ -49,12 +49,8 @@ static inline void s805_dma_hard_reset ( void ) {
 static void s805_dma_reschedule_broken ( struct s805_dmadev *m ) {
 
 	struct s805_desc * d, * temp;
-	LIST_HEAD(head);
 	
-	list_splice_tail_init(&m->completed, &head);
-	list_splice_tail_init(&m->in_progress, &head);
-	
-	list_for_each_entry_safe(d, temp, &head, elem) {
+	list_for_each_entry_safe(d, temp, &m->in_progress, elem) {
 		
 		if (d->next) {
 
@@ -101,7 +97,7 @@ static irqreturn_t s805_dma_to_callback (int irq, void *data)
 		s805_dma_hard_reset();
 		
 		s805_dma_reschedule_broken(m);
-		tasklet_hi_schedule(&m->tasklet_completed); /* Bypass to "s805_dma_fetch_tr", no descriptor will be found in m->completed */
+		tasklet_hi_schedule(&m->tasklet_completed); /* Bypass to "s805_dma_fetch_tr", no descriptor will be found in m->in_progress */
 		
 	} else
 	    dev_info(m->ddev.dev,"Timeout interrupt: Bye Bye.\n");

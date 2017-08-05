@@ -60,7 +60,7 @@ struct s805_crc_mgr {
 struct s805_crc_reqctx {
 
 	struct dma_async_tx_descriptor * tx_desc;
-	s805_init_desc * init_nfo;
+	//s805_init_desc * init_nfo;
 	bool initialized;
 	bool finalized;
 
@@ -118,14 +118,15 @@ static s805_dtable * def_init_crc_tdesc (unsigned int frames)
 	
 }
 
-s805_dtable * sg_crc_move_along (s805_dtable * cursor, s805_init_desc * init_nfo) {
+s805_dtable * sg_crc_move_along (struct s805_desc * d, s805_dtable * cursor) {
 
 	if (cursor) {
-		list_add_tail(&cursor->elem, &init_nfo->d->desc_list);
- 		init_nfo->d->frames ++;
+		
+		list_add_tail(&cursor->elem, &d->desc_list);
+ 	    d->frames ++;
 	}
 	
-	return def_init_crc_tdesc(init_nfo->d->frames);
+	return def_init_crc_tdesc(d->frames);
 }
 
 static int s805_crc_launch_job (struct s805_crc_reqctx *ctx, bool chain) {
@@ -153,8 +154,7 @@ static int s805_crc_launch_job (struct s805_crc_reqctx *ctx, bool chain) {
 			return tx_cookie;
 				
 		}
-
-		kfree(ctx->init_nfo); /* !!! */
+		
 		dma_async_issue_pending(&crc_mgr->chan->vc.chan);
 
 		return 0;
@@ -194,10 +194,11 @@ static void s805_crc_handle_completion (void * req_ptr) {
 	spin_unlock(&crc_mgr->lock);
 	
 	job->initialized = false;
+
+	/* in a thread */
+	req->base.complete(&req->base, 0);
 	
 	job = list_first_entry_or_null (&crc_mgr->jobs, struct s805_crc_reqctx, elem);
-	
-	req->base.complete(&req->base, 0);
 	
 	if (job)  
 		s805_crc_launch_job(job, true);
@@ -253,19 +254,8 @@ static int s805_crc_add_data (struct ahash_request *req, bool last) {
 		return -EINVAL;
 		
 	}
-
-	/* if (!crc_map_dst(&ctx->dst, sg_dma_len(req->src))) */
-	/* 	return -ENOMEM; &ctx->dst */
 	
-	/* ctx->tx_desc = s805_scatterwalk (req->src, req->src, ctx->init_nfo, ctx->tx_desc, req->nbytes, false); //dst = NULL */
-
-	/* if (!ctx->tx_desc) { */
-		
-	/* 	dev_err(crc_mgr->dev, "%s: Failed to add data chunk.\n", __func__); */
-	/* 	return -ENOMEM; */
-	/* } */
-
-	ctx->tx_desc = s805_scatterwalk (req->src, req->src, ctx->init_nfo, ctx->tx_desc, req->nbytes, last); //dst = NULL
+	ctx->tx_desc = s805_scatterwalk (req->src, req->src, ctx->tx_desc, req->nbytes, last); //dst = NULL
 
 	if (!ctx->tx_desc) {
 		
@@ -293,7 +283,7 @@ static int s805_crc_init_ctx (struct ahash_request *req) {
 	else if (ctx->finalized)
 		ctx->finalized = false;
 	
-	ctx->tx_desc = dmaengine_prep_dma_interrupt (&crc_mgr->chan->vc.chan, S805_DMA_CRYPTO_FLAG | S805_DMA_CRYPTO_CRC_FLAG); //S805_DMA_CRYPTO_FLAG : Won't free the descriptor table !!
+	ctx->tx_desc = dmaengine_prep_dma_interrupt (&crc_mgr->chan->vc.chan, S805_DMA_CRYPTO_FLAG | S805_DMA_CRYPTO_CRC_FLAG); //S805_DMA_CRYPTO_CRC_FLAG: Won't free the descriptor table !!
 
 	if (!ctx->tx_desc) {
 		
@@ -304,18 +294,17 @@ static int s805_crc_init_ctx (struct ahash_request *req) {
 	ctx->tx_desc->callback = (void *) &s805_crc_handle_completion;
 	ctx->tx_desc->callback_param = (void *) req;
 
-	ctx->init_nfo = kzalloc(sizeof(s805_init_desc),
-							crypto_ahash_get_flags(crypto_ahash_reqtfm(req)) & CRYPTO_TFM_REQ_MAY_SLEEP
-							? GFP_KERNEL
-							: GFP_NOWAIT);
+	/* /\* May die. *\/ */
+	/* ctx->init_nfo = kzalloc(sizeof(s805_init_desc), */
+	/* 						crypto_ahash_get_flags(crypto_ahash_reqtfm(req)) & CRYPTO_TFM_REQ_MAY_SLEEP */
+	/* 						? GFP_KERNEL */
+	/* 						: GFP_NOWAIT); */
 
-	if (!ctx->init_nfo) {
+	/* if (!ctx->init_nfo) { */
 		
-	    dev_err(crc_mgr->dev, "%s: Failed to allocate initialization info structure.\n", __func__);
-		return -ENOMEM;
-	}
-
-	ctx->init_nfo->type = CRC_DESC;
+	/*     dev_err(crc_mgr->dev, "%s: Failed to allocate initialization info structure.\n", __func__); */
+	/* 	return -ENOMEM; */
+	/* } */
 	
 	ctx->initialized = true;
 	

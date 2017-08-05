@@ -1,9 +1,9 @@
 #include <linux/platform_device.h>
 #include <linux/module.h>
 #include <linux/s805_dmac.h>
-#include <linux/s805_crypto.h>
 #include <linux/dma-mapping.h>
 #include <crypto/des.h>
+#include "s805_crypto.h"
 
 /* Registers & Bitmaps for the s805 DMAC TDES algorithm. */
 #define TDES_KEY_SIZE                         DES3_EDE_KEY_SIZE
@@ -32,6 +32,11 @@ typedef enum des_type {
     DES_SIMPLE,
 	DES_MULTI
 } s805_des_type;
+
+typedef enum tdes_mode {
+	TDES_MODE_ECB,
+    TDES_MODE_CBC
+} s805_tdes_mode;
 
 struct s805_tdes_mgr {
 
@@ -108,14 +113,17 @@ static s805_dtable * def_init_tdes_tdesc (unsigned int frames, s805_tdes_mode mo
 	
 }
 
-s805_dtable * sg_tdes_move_along (s805_dtable * cursor, s805_init_desc * init_nfo) {
+s805_dtable * sg_tdes_move_along (struct s805_desc * d, s805_dtable * cursor) {
 
+	struct s805_tdes_reqctx *rctx = ablkcipher_request_ctx((struct ablkcipher_request *)d->req);
+	
 	if (cursor) {
-		list_add_tail(&cursor->elem, &init_nfo->d->desc_list);
- 		init_nfo->d->frames ++;
+		
+		list_add_tail(&cursor->elem, &d->desc_list);
+ 	    d->frames ++;
 	}
 	
-	return def_init_tdes_tdesc(init_nfo->d->frames, init_nfo->tdes_mode);
+	return def_init_tdes_tdesc(d->frames, rctx->mode);
 }
 
 static int s805_tdes_cra_init(struct crypto_tfm *tfm)
@@ -154,29 +162,6 @@ static inline void s805_tdes_set_hw_regs (struct ablkcipher_request *req) {
 	WR(S805_CTRL_TDES_MODE(rctx->mode) | S805_CTRL_TDES_DIR(rctx->dir) | S805_CTRL_TDES_PUSH_MODE, S805_TDES_CTRL);
 }
 
-static int s805_ddes_setkey(struct crypto_ablkcipher *tfm, const u8 *key, unsigned int keylen)
-{
-
-	struct s805_tdes_ctx *ctx = crypto_ablkcipher_ctx(tfm);
-	u64 * kcomp = (u64 *) key;
-	
-	/* Wrong key sizes filtered out by interface. */
-	
-	if (kcomp[0] == kcomp[1]) {
-		
-		crypto_ablkcipher_set_flags(tfm, CRYPTO_TFM_RES_BAD_KEY_SCHED);
-		return -EINVAL;
-	}
-
-	/* Under driver point of view this is, actually, a particular case of TDES where K3 == K1 while K1 != K2. */
-	memcpy(ctx->key, key, keylen);
-	memcpy(&ctx->key[2], key, keylen/2);
-	
-	ctx->keylen = keylen;
-
-	return 0;
-}
-
 static int s805_tdes_setkey(struct crypto_ablkcipher *tfm, const u8 *key, unsigned int keylen)
 {
 	struct s805_tdes_ctx *ctx = crypto_ablkcipher_ctx(tfm);
@@ -213,6 +198,29 @@ static int s805_tdes_setkey(struct crypto_ablkcipher *tfm, const u8 *key, unsign
 	return 0;
 }
 
+static int s805_ddes_setkey(struct crypto_ablkcipher *tfm, const u8 *key, unsigned int keylen)
+{
+
+	struct s805_tdes_ctx *ctx = crypto_ablkcipher_ctx(tfm);
+	u64 * kcomp = (u64 *) key;
+	
+	/* Wrong key sizes filtered out by interface. */
+	
+	if (kcomp[0] == kcomp[1]) {
+		
+		crypto_ablkcipher_set_flags(tfm, CRYPTO_TFM_RES_BAD_KEY_SCHED);
+		return -EINVAL;
+	}
+
+	/* Under driver point of view this is, actually, a particular case of TDES where K3 == K1 while K1 != K2. */
+	memcpy(ctx->key, key, keylen);
+	memcpy(&ctx->key[2], key, keylen/2);
+	
+	ctx->keylen = keylen;
+
+	return 0;
+}
+
 static int s805_des_setkey(struct crypto_ablkcipher *tfm, const u8 *key, unsigned int keylen)
 {
 	struct s805_tdes_ctx *ctx = crypto_ablkcipher_ctx(tfm);
@@ -240,14 +248,14 @@ static int s805_tdes_crypt_launch_job (struct ablkcipher_request *req, bool chai
 		tx_cookie = dmaengine_submit(rctx->tx_desc);
 	
 		if(tx_cookie < 0) {
-		
+			
 			dev_err(tdes_mgr->dev, "%s: Failed to get cookie.\n", __func__);
 			return tx_cookie;
-		
+			
 		}
-	
+		
 		dma_async_issue_pending(&tdes_mgr->chan->vc.chan);
-
+		
 		return 0;
 		
 	} else
@@ -264,14 +272,15 @@ static void s805_tdes_crypt_handle_completion (void * req_ptr) {
 	spin_lock(&tdes_mgr->lock);
 	list_del(&job->elem);
 	spin_unlock(&tdes_mgr->lock);
+
+	/* Must we run this in a thread ?? */
+	req->base.complete(&req->base, 0);
 	
 	job = list_first_entry_or_null (&tdes_mgr->jobs, struct s805_tdes_reqctx, elem);
 	
-	req->base.complete(&req->base, 0);
-	
-	if (job)  
+	if (job) {
 		s805_tdes_crypt_launch_job(to_ablkcipher_request(job), true);
-	else {
+	} else {
 		spin_lock(&tdes_mgr->lock);
 		tdes_mgr->busy = false;
 		spin_unlock(&tdes_mgr->lock);
@@ -295,7 +304,6 @@ static int s805_tdes_crypt_prep (struct ablkcipher_request *req, s805_tdes_mode 
 	
 	struct s805_tdes_reqctx *rctx = ablkcipher_request_ctx(req);
 	struct scatterlist * aux;
-	s805_init_desc * init_nfo;
 	int len, j = 0;
 	
 	if (!IS_ALIGNED(req->nbytes, DES_BLOCK_SIZE)) {
@@ -303,20 +311,10 @@ static int s805_tdes_crypt_prep (struct ablkcipher_request *req, s805_tdes_mode 
 	    crypto_ablkcipher_set_flags(crypto_ablkcipher_reqtfm(req), CRYPTO_TFM_RES_BAD_BLOCK_LEN);
 		return -EINVAL;
 	}
-	
-	/* Allocate and setup the information for descriptor initialization */
-	init_nfo = kzalloc(sizeof(s805_init_desc),
-					   crypto_ablkcipher_get_flags(crypto_ablkcipher_reqtfm(req)) & CRYPTO_TFM_REQ_MAY_SLEEP
-					   ? GFP_KERNEL
-					   : GFP_NOWAIT);
-
-	if (!init_nfo) {
-	    dev_err(tdes_mgr->dev, "%s: Failed to allocate initialization info structure.\n", __func__);
-		return -ENOMEM;
-	}
-	
-	init_nfo->type = TDES_DESC;
-	init_nfo->tdes_mode = mode;
+		
+	rctx->dir = dir;
+	rctx->mode = mode;
+	rctx->type = type;
 	
 	aux = req->src;
 	
@@ -327,7 +325,6 @@ static int s805_tdes_crypt_prep (struct ablkcipher_request *req, s805_tdes_mode 
 		if (!IS_ALIGNED(len, DES_BLOCK_SIZE)) {
 			
 		    crypto_ablkcipher_set_flags(crypto_ablkcipher_reqtfm(req), CRYPTO_TFM_RES_BAD_BLOCK_LEN);
-			kfree(init_nfo);
 			return -EINVAL;
 		}
 		
@@ -336,31 +333,25 @@ static int s805_tdes_crypt_prep (struct ablkcipher_request *req, s805_tdes_mode 
 	}
 
 	rctx->tx_desc = dmaengine_prep_dma_interrupt (&tdes_mgr->chan->vc.chan, S805_DMA_CRYPTO_FLAG | S805_DMA_CRYPTO_TDES_FLAG);
-
+	
 	if (!rctx->tx_desc) {
 		
 		dev_err(tdes_mgr->dev, "%s: Failed to allocate dma descriptor.\n", __func__);
-		kfree(init_nfo);
 		return -ENOMEM;
 	}
-
-	rctx->tx_desc = s805_scatterwalk (req->src, req->dst, init_nfo, rctx->tx_desc, req->nbytes, true);
-
+	
+	s805_crypto_set_req(rctx->tx_desc, req);
+	rctx->tx_desc = s805_scatterwalk (req->src, req->dst, rctx->tx_desc, req->nbytes, true);
+	
 	if (!rctx->tx_desc) {
 		
 		dev_err(tdes_mgr->dev, "%s: Failed to allocate data chunks.\n", __func__);
-		kfree(init_nfo);
 		return -ENOMEM;
 		
 	}
 	
-	kfree(init_nfo);
-	
 	rctx->tx_desc->callback = (void *) &s805_tdes_crypt_handle_completion;
 	rctx->tx_desc->callback_param = (void *) req;
-	rctx->dir = dir;
-	rctx->mode = mode;
-	rctx->type = type;
 	
 	return s805_tdes_crypt_schedule_job (req);
 }

@@ -97,14 +97,15 @@ static s805_dtable * def_init_divx_tdesc (unsigned int frames)
 	
 }
 
-s805_dtable * sg_divx_move_along (s805_dtable * cursor, s805_init_desc * init_nfo) {
+s805_dtable * sg_divx_move_along (struct s805_desc * d, s805_dtable * cursor) {
 
 	if (cursor) {
-		list_add_tail(&cursor->elem, &init_nfo->d->desc_list);
- 		init_nfo->d->frames ++;
+		
+		list_add_tail(&cursor->elem, &d->desc_list);
+ 	    d->frames ++;		
 	}
 	
-	return def_init_divx_tdesc(init_nfo->d->frames);
+	return def_init_divx_tdesc(d->frames);
 }
 
 static int s805_divx_launch_job (struct s805_divx_reqctx *ctx, bool chain) {
@@ -141,13 +142,13 @@ static void s805_divx_handle_completion (void * req_ptr) {
 	
     struct acomp_req *req = req_ptr;
 	struct s805_divx_reqctx * job = acomp_request_ctx(req);
-	
-	/* Hopefully DivX decryption will happen in an "inline manner", so decrypted data will be in the src scatterlist provided by the user.*/
-	req->base.complete(&req->base, 0);
 		
 	spin_lock(&divx_mgr->lock);
 	list_del(&job->elem);
 	spin_unlock(&divx_mgr->lock);
+
+	/* Hopefully DivX decompression will happen in an "inline manner", so decrypted data will be in the src scatterlist provided by the user. in a thread!*/
+	req->base.complete(&req->base, 0);
 	
 	job = list_first_entry_or_null (&divx_mgr->jobs, struct s805_divx_reqctx, elem);
 	
@@ -163,7 +164,6 @@ static void s805_divx_handle_completion (void * req_ptr) {
 static int s805_divx_decompress (struct acomp_req *req) {
 
 	struct s805_divx_reqctx *ctx = acomp_request_ctx(req);
-	s805_init_desc * init_nfo;
 	
 	/* I'm missing a lot of info here, so I leave this implementation here and if any correction is needed, please apply it. */
 	
@@ -173,37 +173,24 @@ static int s805_divx_decompress (struct acomp_req *req) {
 		return -EINVAL;
 		
 	}
-	
-	init_nfo = kzalloc(sizeof(s805_init_desc), GFP_NOWAIT);
-	
-	if (!init_nfo) {
-	    dev_err(divx_mgr->dev, "%s: Failed to allocate initialization info structure.\n", __func__);
-		return -ENOMEM;
-	}
-	
-    init_nfo->type = DIVX_DESC;
 
 	ctx->tx_desc = dmaengine_prep_dma_interrupt (&divx_mgr->chan->vc.chan, S805_DMA_CRYPTO_FLAG | S805_DMA_CRYPTO_DIVX_FLAG);
 
 	if (!ctx->tx_desc) {
 		
 		dev_err(divx_mgr->dev, "%s: Failed to get dma descriptor.\n", __func__);
-		kfree(init_nfo);
 		return -ENOMEM;
 			
 	}
 		
-	ctx->tx_desc = s805_scatterwalk (req->src, NULL, init_nfo, ctx->tx_desc, UINT_MAX, true);
+	ctx->tx_desc = s805_scatterwalk (req->src, NULL, ctx->tx_desc, UINT_MAX, true);
 
 	if (!ctx->tx_desc) {
 		
 		dev_err(divx_mgr->dev, "%s: Failed to allocate data chunks.\n", __func__);
-		kfree(init_nfo);
 		return -ENOMEM;
 		
 	}
-
-	kfree (init_nfo);
 
 	ctx->tx_desc->callback = (void *) &s805_divx_handle_completion;
 	ctx->tx_desc->callback_param = (void *) req;
