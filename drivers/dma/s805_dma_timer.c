@@ -36,6 +36,8 @@ static inline void s805_dma_hard_reset ( void ) {
 	
 	WR(status, S805_DMA_CTRL);
 
+	WR(S805_DMA_SET_SLICE(S805_DMA_DEF_SLICE), S805_DMA_THREAD_CTRL);
+	
 	WR(S805_DMA_FIRQ_BIT, S805_DMA_FIRQ_SEL);
 }
 

@@ -29,9 +29,7 @@
 
 #define S805_DMA_MAX_BURST               (0xFFFF - (S805_DMA_ALIGN_SIZE - 1))
 #define S805_DMA_MAX_SKIP                (0xFFFF - (S805_DMA_ALIGN_SIZE - 1))
-#define S805_MAX_TR_SIZE                 (0x1FFFFFF - (S805_DMA_ALIGN_SIZE - 1)) 
-
-#define S805_DMA_THREAD_CTRL             P_NDMA_THREAD_REG
+#define S805_MAX_TR_SIZE                 (0x1FFFFFF - (S805_DMA_ALIGN_SIZE - 1))
 
 #define S805_DMA_DLST_STR0               P_NDMA_THREAD_TABLE_START0
 #define S805_DMA_DLST_END0               P_NDMA_THREAD_TABLE_END0
@@ -1874,23 +1872,29 @@ static inline void s805_dma_thread_disable ( uint thread_id ) {
  *
  */
 static inline void s805_dma_enable_hw ( void ) { 
-
+	
 	uint i;
 	u32 status = RD(S805_DMA_CLK);
+	
+	/* Main clock */
 	WR(status | S805_DMA_ENABLE, S805_DMA_CLK);
 	
 	status = RD(S805_DMA_CTRL);
 	
+	/* Autosuspend, future Kconfig option. */
 	status &= ~S805_DMA_DMA_PM;
 	status |= S805_DMA_ENABLE;
 	
 	WR(status, S805_DMA_CTRL);
-
+	
+	/* Fast IRQ */
 	WR(S805_DMA_FIRQ_BIT, S805_DMA_FIRQ_SEL);
+	
+	/* Default thread slice (1 page) */
+	WR(S805_DMA_SET_SLICE(S805_DMA_DEF_SLICE), S805_DMA_THREAD_CTRL);
 	
 	for (i = 0; i < S805_DMA_MAX_HW_THREAD; i++)
 		s805_dma_thread_disable(i);
-	
 }
 
 /**
@@ -2537,7 +2541,7 @@ static int s805_dma_control (struct dma_chan *chan,
 			vchan_dma_desc_free_list(&c->vc, &c->vc.desc_submitted);
 			
 			spin_unlock(&c->vc.lock);
-
+			
 			/* 
 			   Returned status will be S805_DMA_TERMINATED it will became 
 			   S805_DMA_SUCCESS when no pending transaction is left. 

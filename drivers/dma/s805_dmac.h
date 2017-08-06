@@ -20,11 +20,14 @@
 #define S805_DMA_FIRQ_SEL                P_MEDIA_CPU_INTR_FIRQ_SEL
 #define S805_DMA_FIRQ_BIT                BIT(12)     
 
-#define __S805_DMAC
-
 #if defined CONFIG_CRYPTO_DEV_S805_TDES && defined CONFIG_CRYPTO_DEV_S805_AES
 #define S805_CRYPTO_CIPHER               1
 #endif
+
+#define S805_DMA_THREAD_CTRL             P_NDMA_THREAD_REG
+
+#define S805_DMA_SET_SLICE(slice)        (slice & 0xFF)     
+#define S805_DMA_DEF_SLICE               16
 
 struct s805_dmadev 
 {
