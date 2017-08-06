@@ -344,8 +344,6 @@ static void s805_aes_crypt_handle_completion (void * req_ptr) {
 	spin_lock(&aes_mgr->lock);
 	list_del(&job->elem);
 	spin_unlock(&aes_mgr->lock);
-
-	req->base.complete(&req->base, 0);
 	
 	job = list_first_entry_or_null (&aes_mgr->jobs, struct s805_aes_reqctx, elem);
 	
@@ -356,6 +354,8 @@ static void s805_aes_crypt_handle_completion (void * req_ptr) {
 		aes_mgr->busy = false;
 		spin_unlock(&aes_mgr->lock);
 	}
+
+	req->base.complete(&req->base, 0);
 }
 
 static int s805_aes_crypt_schedule_job (struct ablkcipher_request *req) {

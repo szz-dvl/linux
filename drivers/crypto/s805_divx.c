@@ -142,13 +142,10 @@ static void s805_divx_handle_completion (void * req_ptr) {
 	
     struct acomp_req *req = req_ptr;
 	struct s805_divx_reqctx * job = acomp_request_ctx(req);
-		
+	
 	spin_lock(&divx_mgr->lock);
 	list_del(&job->elem);
 	spin_unlock(&divx_mgr->lock);
-
-	/* Hopefully DivX decompression will happen in an "inline manner", so decrypted data will be in the src scatterlist provided by the user. in a thread!*/
-	req->base.complete(&req->base, 0);
 	
 	job = list_first_entry_or_null (&divx_mgr->jobs, struct s805_divx_reqctx, elem);
 	
@@ -159,6 +156,9 @@ static void s805_divx_handle_completion (void * req_ptr) {
 	    divx_mgr->busy = false;
 		spin_unlock(&divx_mgr->lock);
 	}
+
+	/* Hopefully DivX decompression will happen in an "inline manner", so decrypted data will be in the src scatterlist provided by the user. in a thread!*/
+	req->base.complete(&req->base, 0);
 }
 
 static int s805_divx_decompress (struct acomp_req *req) {

@@ -272,9 +272,6 @@ static void s805_tdes_crypt_handle_completion (void * req_ptr) {
 	spin_lock(&tdes_mgr->lock);
 	list_del(&job->elem);
 	spin_unlock(&tdes_mgr->lock);
-
-	/* Must we run this in a thread ?? */
-	req->base.complete(&req->base, 0);
 	
 	job = list_first_entry_or_null (&tdes_mgr->jobs, struct s805_tdes_reqctx, elem);
 	
@@ -285,6 +282,8 @@ static void s805_tdes_crypt_handle_completion (void * req_ptr) {
 		tdes_mgr->busy = false;
 		spin_unlock(&tdes_mgr->lock);
 	}
+
+	req->base.complete(&req->base, 0);
 }
 
 static int s805_tdes_crypt_schedule_job (struct ablkcipher_request *req) {

@@ -1392,13 +1392,7 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 		
 		if ((periods * period_len) > buf_len)
 			return NULL;
-	}
-	
-	/* Is that warning fair? */
-	if (buf_len > S805_DMA_ALIGN_SIZE && direction == DMA_DEV_TO_DEV)
-		dev_warn(chan->device->dev,
-				 "%s: buffer_length (%u) is > S805_DMA_ALIGN_SIZE (%u) while direction is DMA_DEV_TO_DEV.\n",
-				 __func__, buf_len, S805_DMA_ALIGN_SIZE);
+	}	
 
 	/* Allocate and setup the root descriptor. */
 	root = d = kzalloc(sizeof(struct s805_desc), GFP_NOWAIT);
@@ -1413,6 +1407,7 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 	cursor = root;
 
 	spin_lock(&d->c->vc.lock);
+	
 	desc_tbl = cyclic_def_init_new_tdesc(c, src_addr, dst_addr, direction, byte_count, period_count, addr_reset, d->frames);
 	
 	if (!desc_tbl)  {
@@ -1909,15 +1904,8 @@ static void s805_dma_desc_free(struct virt_dma_desc *vd)
 	struct s805_desc * aux, *cursor, * me = to_s805_dma_desc(&vd->tx);
 	struct s805_chan * c = me->c;
 	s805_dtable * desc_tbl, * temp;	
-	//bool cyclic = false;
-
-	/* while(!spin_trylock(&c->vc.lock)) */
-	/* 	cpu_relax(); */
 	
 	if (s805_desc_is_cyclic(me)) {
-		
-		/* tasklet_disable(&c->vc.task);  */
-		/* cyclic = true; */
 		
 		cursor = me->next;
 
@@ -1943,28 +1931,21 @@ static void s805_dma_desc_free(struct virt_dma_desc *vd)
 		list_del(&desc_tbl->elem);
 		kfree(desc_tbl);	
 	}
-
-	//spin_unlock(&c->vc.lock);
 	
 	if (me->memset) {
 		
 		dma_pool_free(me->c->pool, me->memset->value, me->memset->paddr);
 		kfree(me->memset);
 	}
-
-	//dma_free_coherent(c->vc.chan.device->dev, sizeof(long long), me->memset->value, me->memset->paddr);
 	
 	dev_dbg(c->vc.chan.device->dev, "Descriptor 0x%p: Freed.", &vd->tx);
     
 	kfree(me);
-
+	
 	c->pending --;
 	
 	if (!c->pending)
 		c->status = S805_DMA_SUCCESS;
-	
-	/* if (cyclic) */
-	/* 	tasklet_enable(&c->vc.task); */
 }
 
 /**
@@ -2144,9 +2125,9 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 	struct s805_desc * d, * aux;
 	
 #ifdef CONFIG_S805_DMAC_SERIALIZE
-	uint thread_enable = S805_DMA_MAX_THREAD;
+	uint thread_disable = S805_DMA_MAX_THREAD;
 #else
-	uint thread_enable = S805_DMA_MAX_HW_THREAD;
+	uint thread_disable = S805_DMA_MAX_HW_THREAD;
 #endif
 	
 #ifdef CONFIG_S805_DMAC_TO
@@ -2260,7 +2241,7 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 		s805_dma_to_start(S805_DMA_TIME_OUT);
 #endif
 	
-	for (thread = 0; thread < thread_enable; thread ++) {
+	for (thread = 0; thread < thread_disable; thread ++) {
 		
 		if ((thread < ini_thread) || (thread_mask & (1 << thread)))
 			s805_dma_thread_enable(thread);
@@ -2327,7 +2308,7 @@ static void s805_dma_process_completed ( unsigned long null )
 		if (likely(d->c->status != S805_DMA_TERMINATED)) {
 			
 			if (likely(!d->next_chunk)) {
-
+				
 				list_del(&d->elem);
 				
 				if (s805_desc_is_cyclic(d)) {
@@ -2341,7 +2322,7 @@ static void s805_dma_process_completed ( unsigned long null )
 					if (d->next->c->status != S805_DMA_PAUSED && mgr->cyclic_busy) {
 						
 						list_add_tail(&d->next->elem, &mgr->in_progress);
-							
+						
 						/* Must always return NULL */
 						s805_dma_allocate_tr (thread,
 											  list_first_entry(&d->next->desc_list, s805_dtable, elem),
@@ -2359,7 +2340,7 @@ static void s805_dma_process_completed ( unsigned long null )
 					}
 					
 				} else {
-
+					
 					dev_dbg(d->c->vc.chan.device->dev, "Marking cookie %d completed for channel %s.\n", d->vd.tx.cookie, dma_chan_name(&d->c->vc.chan));
 
 				    if (!s805_desc_is_crypto_crc(d)) {
@@ -2443,15 +2424,14 @@ static void s805_dma_process_completed ( unsigned long null )
 
 static irqreturn_t s805_dma_callback (int irq, void *data)
 {
-
 	struct s805_dmadev *m = data;
 	
 	preempt_disable();
 	
 	if (! --m->__pending)
 		tasklet_hi_schedule(&m->tasklet_completed);
-	
-	preempt_enable();
+
+    preempt_enable();
 	
 	return IRQ_HANDLED;
 }
@@ -2493,10 +2473,10 @@ static s805_status s805_dma_chan_wait_for_pending (struct s805_chan * c) {
 		now = jiffies;
 		while (time_before(jiffies, now + 1))
 			cpu_relax();
-
+		
 		alive --;
 	}
-
+	
 	if (!alive)
 		dev_err(c->vc.chan.device->dev, "%s (%s): timed-out!\n", __func__, dma_chan_name(&c->vc.chan));
 
@@ -2546,9 +2526,9 @@ static int s805_dma_control (struct dma_chan *chan,
 	
 	switch (cmd) {
 	case DMA_TERMINATE_ALL:
-		{
-			
-			s805_status init = c->status;
+		{	
+			if (!c->pending)
+				return c->status;
 			
 			c->status = S805_DMA_TERMINATED;
 			
@@ -2558,8 +2538,10 @@ static int s805_dma_control (struct dma_chan *chan,
 			
 			spin_unlock(&c->vc.lock);
 
-			c->status = s805_dma_chan_terminate (c, init);
-
+			/* 
+			   Returned status will be S805_DMA_TERMINATED it will became 
+			   S805_DMA_SUCCESS when no pending transaction is left. 
+			*/
 		}
 		break;;
 		
@@ -2601,6 +2583,7 @@ static int s805_dma_control (struct dma_chan *chan,
 			}
 		}
 	    break;;
+		
 	case DMA_SLAVE_CONFIG:
 		{
 			struct dma_slave_config *cfg = (struct dma_slave_config *) arg;
@@ -2624,8 +2607,7 @@ static int s805_dma_control (struct dma_chan *chan,
 		break;;
 		
 	default:
-		dev_err(c->vc.chan.device->dev, "Unsupported cmd: %d\n", cmd);
-		return -EINVAL;
+		break;;
 	}
 	
 	return c->status;
@@ -2646,7 +2628,7 @@ static u32 get_residue (struct s805_desc * me) {
 	/* Cyclic transfer*/
 	if (s805_desc_is_cyclic(me)) {
 
-		cursor = me->next;
+		cursor = me;
 		
 		/* Will count the prediods we are lacking till the end of the buffer. */
 		while (cursor != me->root) {
@@ -2655,11 +2637,13 @@ static u32 get_residue (struct s805_desc * me) {
 				residue += desc->table->count;
 			
 			cursor = cursor->next;
-		}	
-	} 
+		}
 		
-	list_for_each_entry_safe (desc, temp, &me->desc_list, elem)
-		residue += desc->table->count;
+	} else {
+		
+		list_for_each_entry_safe (desc, temp, &me->desc_list, elem)
+			residue += desc->table->count;
+	}
 	
 	return residue;
 }
@@ -2695,12 +2679,6 @@ enum dma_status s805_dma_tx_status(struct dma_chan *chan,
 			residue = get_residue (d);
 	}
 	
-	/* list_for_each_entry_safe (d, temp, &mgr->in_progress, elem) { */
-		
-	/* 	if (d->vd.tx.cookie == cookie)  */
-	/* 		residue = get_residue (d);		 */
-	/* } */
-	
 	dma_set_residue(txstate, residue);
 	
 	return ret;
@@ -2715,13 +2693,22 @@ enum dma_status s805_dma_tx_status(struct dma_chan *chan,
 static void s805_dma_issue_pending(struct dma_chan *chan)
 {
 	struct s805_chan *c = to_s805_dma_chan(chan);
+
+	/* 
+	   If any prevoiusly terminated channel tries to issue a new transaction while the former ones are yet unfreed
+	   new transactions won't be scheduled, and there is no way to inform the user about this from here, so, 
+	   we need to either add a new command to dma_control to return the current status (notice that any "non-standard" 
+	   command will return the current status of the channel) for the user to take care of this, or modify this 
+	   function to return the status of the channel after the operation. As mentioned above, if a user runs 
+	   device->dma_control() the current status will be returned, however this is not offered in the interface.   
+	*/
 	
 	spin_lock(&c->vc.lock);
 	if (vchan_issue_pending(&c->vc))  {
 		
 		s805_dma_process_next_desc(c);
 		spin_unlock(&c->vc.lock);
-
+		
 	} else
 		spin_unlock(&c->vc.lock);
 }
@@ -2810,13 +2797,13 @@ static int s805_dmamgr_probe(struct platform_device *pdev)
 	mgr = devm_kzalloc(&pdev->dev, sizeof(struct s805_dmadev), GFP_KERNEL);
 	if (!mgr)
 		return -ENOMEM;
-
+	
 	pdev->dev.dma_parms = &mgr->dma_parms;
-
+	
 	/* Init internal structs */
 	mgr->ddev.dev = &pdev->dev;
 	INIT_LIST_HEAD(&mgr->ddev.channels);
-
+	
 	spin_lock_init(&mgr->lock);
 	
 	INIT_LIST_HEAD(&mgr->scheduled);
@@ -2848,14 +2835,14 @@ static void s805_dma_free(struct s805_dmadev *m)
 {
 	/* Check for active descriptors. */
 	struct s805_chan *c, *next;
-
+	
 	list_for_each_entry_safe(c, next, &m->ddev.channels,
 							 vc.chan.device_node) {
 		
 		list_del(&c->vc.chan.device_node);
 		tasklet_kill(&c->vc.task);
 	}
-
+	
 	free_irq(m->irq_number, m);
 	
 #ifdef CONFIG_S805_DMAC_TO

@@ -194,9 +194,6 @@ static void s805_crc_handle_completion (void * req_ptr) {
 	spin_unlock(&crc_mgr->lock);
 	
 	job->initialized = false;
-
-	/* in a thread */
-	req->base.complete(&req->base, 0);
 	
 	job = list_first_entry_or_null (&crc_mgr->jobs, struct s805_crc_reqctx, elem);
 	
@@ -207,6 +204,8 @@ static void s805_crc_handle_completion (void * req_ptr) {
 	    crc_mgr->busy = false;
 		spin_unlock(&crc_mgr->lock);
 	}
+
+	req->base.complete(&req->base, 0);
 }
 
 /* Debug */
@@ -294,18 +293,6 @@ static int s805_crc_init_ctx (struct ahash_request *req) {
 	ctx->tx_desc->callback = (void *) &s805_crc_handle_completion;
 	ctx->tx_desc->callback_param = (void *) req;
 
-	/* /\* May die. *\/ */
-	/* ctx->init_nfo = kzalloc(sizeof(s805_init_desc), */
-	/* 						crypto_ahash_get_flags(crypto_ahash_reqtfm(req)) & CRYPTO_TFM_REQ_MAY_SLEEP */
-	/* 						? GFP_KERNEL */
-	/* 						: GFP_NOWAIT); */
-
-	/* if (!ctx->init_nfo) { */
-		
-	/*     dev_err(crc_mgr->dev, "%s: Failed to allocate initialization info structure.\n", __func__); */
-	/* 	return -ENOMEM; */
-	/* } */
-	
 	ctx->initialized = true;
 	
 	return 0;

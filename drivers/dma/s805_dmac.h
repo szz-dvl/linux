@@ -12,7 +12,7 @@
 #ifdef CONFIG_S805_DMAC_TO
 #define S805_DMA_TIME_OUT                CONFIG_S805_DMAC_TO_VAL  /* ms */
 #else
-#define S805_DMA_TIME_OUT                150                      /* Used in terminate channel and channel release, for busy waiting a channel to free its pending transactions. */
+#define S805_DMA_TIME_OUT                150                      /* Used in channel release, for busy waiting a channel to free its pending transactions. */
 #endif
 
 #define S805_DMA_MAX_HW_THREAD           4
@@ -55,7 +55,7 @@ struct s805_dmadev
 	bool cyclic_busy;
 	bool busy;
 
-	u8 __pending;
+	uint __pending;
 };
 
 #ifdef CONFIG_S805_DMAC_TO
