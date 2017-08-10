@@ -84,21 +84,21 @@ struct s805_desc {
 	
 	/* Descriptors pending of process */
 	unsigned int frames;
-
+	
 	/* Struct to store the information for memset source value */
 	struct memset_info * memset;
-
+	
 	/* For transactions with more than S805_DMA_MAX_DESC data chunks. */
 	s805_dtable * next_chunk;
-
+	
 	/* For cyclic transfers */
 	struct s805_desc * next;
 	struct s805_desc * root;
-
+	
 	/* For crypto requests */
 	uint byte_count;
 	void * req;
-
+	
 	/* Identifiers */
 	unsigned long flags;
 };
@@ -107,6 +107,10 @@ typedef struct s805_chan {
 	
 	struct virt_dma_chan vc;
 
+	/* spin lock to prepare transactions */
+	spinlock_t prep_lock;
+	spinlock_t issued_lock;
+	
 	/* Channel configuration, needed for slave_sg and cyclic transfers. */
 	struct dma_slave_config cfg;
 
@@ -185,6 +189,10 @@ static inline bool s805_desc_is_crypto_divx (struct s805_desc * d) {
 
 static inline s805_desc_type s805_desc_get_type (struct s805_desc * d) {
 	return (d->flags & S805_DMA_PRIVATE_FLAGS);
+}
+
+static inline bool s805_desc_is_empty (struct s805_desc * d) {
+	return list_empty(&d->desc_list);
 }
 
 static inline struct s805_chan *to_s805_dma_chan(struct dma_chan *c)

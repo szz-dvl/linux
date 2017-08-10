@@ -53,24 +53,30 @@ static void s805_dma_reschedule_broken ( struct s805_dmadev *m ) {
 	struct s805_desc * d, * temp;
 	
 	list_for_each_entry_safe(d, temp, &m->in_progress, elem) {
-		
-		if (d->next) {
 
-			spin_lock(&m->lock);
-			list_move_tail(&d->elem, &m->scheduled); /* Pospose cyclic transfer, at least, till failed non cyclic transfers are finished. */
-			spin_unlock(&m->lock);
-		   		    
-			m->cyclic_busy = false;
+		if (!s805_desc_is_empty(d)) { /* Allow empty descriptors to be completed by the next schedule of tasklet_complet */
 			
-		}  else {
+			if (s805_desc_is_cyclic(d)) {
 
-			spin_lock(&m->lock);
-			list_move(&d->elem, &m->scheduled); /* Re-schedule transactions that where in the batch in the moment of the time-out, giving them preference (in the head of the queue) */
-			spin_unlock(&m->lock);
+				spin_lock(&m->lock);
+				list_move_tail(&d->elem, &m->scheduled); /* Pospose cyclic transfer, at least, till failed non cyclic transfers are finished. */
+				spin_unlock(&m->lock);
+		   		
+				m->cyclic_busy = false;
+			
+			}  else {
+				
+				spin_lock(&m->lock);
+				list_move(&d->elem, &m->scheduled); /* Re-schedule transactions that where in the batch in the moment of the time-out, giving them preference (in the head of the queue) */
+				spin_unlock(&m->lock);
 
+				if (s805_desc_is_crypto_cipher(d))
+					m->cipher_busy = false;
+			
 #ifndef CONFIG_S805_DMAC_SERIALIZE
-			m->thread_reset ++;
+				m->thread_reset ++;
 #endif
+			}
 		}
 	}
 	
@@ -99,7 +105,7 @@ static irqreturn_t s805_dma_to_callback (int irq, void *data)
 		s805_dma_hard_reset();
 		
 		s805_dma_reschedule_broken(m);
-		tasklet_hi_schedule(&m->tasklet_completed); /* Bypass to "s805_dma_fetch_tr", no descriptor will be found in m->in_progress */
+		tasklet_hi_schedule(&m->tasklet_completed); /* Bypass to "s805_dma_fetch_tr", no descriptor, unless empty ones, will be found in m->in_progress */
 		
 	} else
 	    dev_info(m->ddev.dev,"Timeout interrupt: Bye Bye.\n");

@@ -174,22 +174,7 @@ static s805_dtable * def_init_new_tdesc (struct s805_chan * c, unsigned int fram
 	/* Control common part */
 	desc_tbl->table->control |= S805_DTBL_PRE_ENDIAN(ENDIAN_NO_CHANGE);
 	desc_tbl->table->control |= S805_DTBL_INLINE_TYPE(INLINE_NORMAL);
-	
-	/* desc_tbl->table->control |= S805_DTBL_NO_BREAK;                   
-	   
-	   Process the whole descriptor at once, without thread switching. 
-	   
-	   This needs to be carefully tested with this approach, if this bit is set the threads will be processed at once, 
-	   without thread switching, what will make that the interrupts to be delivered more separated in time, however
-	   if this bit is not set the work of the active threads will be, in some manner, balanced so if we see the
-	   the 4 threads, with its possible active transactions, as a batch of transactions (what is actually what this
-	   implementation tries) to not set this bit may be a benefit, specially if "in_progress" transactions differ
-	   in size. In the other hand if "in_progress" transactions are similar in size interrupts may be delivered very
-	   close in time, leading to hardware failures.
-	   
-	   As exposed above, to be tested. 
-																		 
-	*/
+	desc_tbl->table->control |= S805_DTBL_NO_BREAK;
 
 	if (!((frames + 1) % S805_DMA_MAX_DESC))
 		desc_tbl->table->control |= S805_DTBL_IRQ;
@@ -316,7 +301,7 @@ static s805_dtable * sg_init_desc (struct s805_desc *d, s805_dtable * chunk) {
 	switch(s805_desc_get_type(d)) {
 #ifdef CONFIG_CRYPTO_DEV_S805_AES
 	case AES_DESC:
-		return sg_aes_move_along (d, chunk);
+		return sg_aes_move_along  (d, chunk);
 #endif
 #ifdef CONFIG_CRYPTO_DEV_S805_TDES
 	case TDES_DESC:
@@ -324,14 +309,15 @@ static s805_dtable * sg_init_desc (struct s805_desc *d, s805_dtable * chunk) {
 #endif
 #ifdef CONFIG_CRYPTO_DEV_S805_CRC
 	case CRC_DESC:
-		return sg_crc_move_along (d, chunk);
+		return sg_crc_move_along  (d, chunk);
 #endif
 #ifdef CONFIG_CRYPTO_DEV_S805_DIVX
 	case DIVX_DESC:
 		return sg_divx_move_along (d, chunk);
 #endif
+		
 	default:
-		return sg_move_along (d, chunk);
+		return sg_move_along      (d, chunk);
 	}
 }
 
@@ -411,7 +397,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 	if (s805_desc_is_crypto(d))
 		limit -= d->byte_count;
 	
-	spin_lock(&d->c->vc.lock);
+	spin_lock(&d->c->prep_lock);
 	
 	desc_tbl = sg_init_desc (d, NULL);
 	
@@ -463,7 +449,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 			src_info.bytes += act_size;
 			dst_info.bytes += act_size;
 			min_size -= act_size;
-
+			
 			if (s805_desc_is_crypto(d)) {
 				
 				d->byte_count += act_size;
@@ -578,7 +564,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 		
 	}
 
-	spin_unlock(&d->c->vc.lock);
+	spin_unlock(&d->c->prep_lock);
 	
 	return tx_desc;
 	
@@ -593,7 +579,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 		kfree(desc_tbl);
 	}
 
-	spin_unlock(&d->c->vc.lock);
+	spin_unlock(&d->c->prep_lock);
 	
 	kfree(d);
 	
@@ -707,7 +693,7 @@ s805_dma_prep_slave_sg( struct dma_chan *chan,
 	info.next = sg_next(info.cursor);
 	info.bytes = 0;
 
-	spin_lock(&d->c->vc.lock);
+	spin_lock(&d->c->prep_lock);
 	
 	desc_tbl = def_init_new_tdesc(c, d->frames);
 
@@ -903,7 +889,7 @@ s805_dma_prep_slave_sg( struct dma_chan *chan,
 	if (!add_zeroed_tdesc(d))
 		goto error_list;
 
-	spin_unlock(&d->c->vc.lock);
+	spin_unlock(&d->c->prep_lock);
 	
 	return vchan_tx_prep(&c->vc, &d->vd, flags);
 	
@@ -919,7 +905,7 @@ s805_dma_prep_slave_sg( struct dma_chan *chan,
 		
 	}
 
-	spin_unlock(&d->c->vc.lock);
+	spin_unlock(&d->c->prep_lock);
 	
 	kfree(d);
 	return NULL; 
@@ -1051,7 +1037,7 @@ s805_dma_prep_interleaved (struct dma_chan *chan,
 	count = 0;
 	byte_cnt = 0;
 
-	spin_lock(&d->c->vc.lock);
+	spin_lock(&d->c->prep_lock);
 	
 	desc_tbl = ileaved_def_init_new_tdesc(c, xt, count, byte_cnt, d->frames);
 	
@@ -1188,7 +1174,7 @@ s805_dma_prep_interleaved (struct dma_chan *chan,
 	if (!add_zeroed_tdesc(d))
 		goto error_allocation;
 
-	spin_unlock(&d->c->vc.lock);
+	spin_unlock(&d->c->prep_lock);
 	
 	return vchan_tx_prep(&c->vc, &d->vd, flags);
 	
@@ -1204,7 +1190,7 @@ s805_dma_prep_interleaved (struct dma_chan *chan,
 		
 	}
 
-	spin_unlock(&d->c->vc.lock);
+	spin_unlock(&d->c->prep_lock);
 	
 	kfree(d);
 	return NULL;
@@ -1404,7 +1390,7 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 	
 	cursor = root;
 
-	spin_lock(&d->c->vc.lock);
+	spin_lock(&d->c->prep_lock);
 	
 	desc_tbl = cyclic_def_init_new_tdesc(c, src_addr, dst_addr, direction, byte_count, period_count, addr_reset, d->frames);
 	
@@ -1474,7 +1460,7 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 			cursor->root = cursor->next = root; /* Close the descriptor chain. */	
 	}
 	
-	spin_unlock(&d->c->vc.lock);
+	spin_unlock(&d->c->prep_lock);
 	
 	return vchan_tx_prep(&c->vc, &root->vd, flags);
 	
@@ -1498,7 +1484,7 @@ s805_dma_prep_dma_cyclic (struct dma_chan *chan,
 		cursor = cursor->next;
 	}
 
-	spin_unlock(&d->c->vc.lock);
+	spin_unlock(&d->c->prep_lock);
 	
 	return NULL;
 }
@@ -1602,7 +1588,7 @@ s805_dma_prep_memcpy (struct dma_chan *chan,
 	d->frames = 0;
 	INIT_LIST_HEAD(&d->desc_list);
 
-	spin_lock(&d->c->vc.lock);
+	spin_lock(&d->c->prep_lock);
 	desc_tbl = def_init_new_tdesc(c, d->frames);
 
 	if (!desc_tbl) {
@@ -1641,7 +1627,7 @@ s805_dma_prep_memcpy (struct dma_chan *chan,
 	if(!add_zeroed_tdesc(d))
 		goto error_allocation;
 
-	spin_unlock(&d->c->vc.lock);
+	spin_unlock(&d->c->prep_lock);
 	
 	return vchan_tx_prep(&c->vc, &d->vd, flags);
 	
@@ -1656,7 +1642,7 @@ s805_dma_prep_memcpy (struct dma_chan *chan,
 		kfree(desc_tbl);
 	}
 
-	spin_unlock(&d->c->vc.lock);
+	spin_unlock(&d->c->prep_lock);
 	
 	kfree(d);
 	return NULL;
@@ -1735,7 +1721,7 @@ s805_dma_prep_memset (struct dma_chan *chan,
 	d->memset->value->val <<= (sizeof(int) * 8);
     d->memset->value->val |= (value & ~0U);
 
-	spin_lock(&d->c->vc.lock);
+	spin_lock(&d->c->prep_lock);
 	
 	desc_tbl = def_init_new_tdesc(c, d->frames);
 
@@ -1778,7 +1764,7 @@ s805_dma_prep_memset (struct dma_chan *chan,
 	if(!add_zeroed_tdesc(d))
 		goto error_allocation;
 
-	spin_unlock(&d->c->vc.lock);
+	spin_unlock(&d->c->prep_lock);
 	
 	return vchan_tx_prep(&c->vc, &d->vd, flags);
 
@@ -1794,7 +1780,7 @@ s805_dma_prep_memset (struct dma_chan *chan,
 		
 	}
 
-	spin_unlock(&d->c->vc.lock);
+	spin_unlock(&d->c->prep_lock);
 	
 	dma_free_coherent(chan->device->dev, sizeof(long long), d->memset->value, d->memset->paddr);
 
@@ -1903,10 +1889,9 @@ static inline void s805_dma_enable_hw ( void ) {
  * @vd: Virtual descriptor associated to our descriptor.
  *
  */
-static void s805_dma_desc_free(struct virt_dma_desc *vd)
+static void __s805_dma_desc_free(struct s805_desc * me, struct s805_chan * c)
 {
-	struct s805_desc * aux, *cursor, * me = to_s805_dma_desc(&vd->tx);
-	struct s805_chan * c = me->c;
+	struct s805_desc * aux, *cursor;
 	s805_dtable * desc_tbl, * temp;	
 	
 	if (s805_desc_is_cyclic(me)) {
@@ -1928,7 +1913,7 @@ static void s805_dma_desc_free(struct virt_dma_desc *vd)
 			kfree(aux);
 		}
 	}
-		
+	
 	list_for_each_entry_safe (desc_tbl, temp, &me->desc_list, elem) {
 
 		dma_pool_free(me->c->pool, desc_tbl->table, desc_tbl->paddr);
@@ -1942,14 +1927,26 @@ static void s805_dma_desc_free(struct virt_dma_desc *vd)
 		kfree(me->memset);
 	}
 	
-	dev_dbg(c->vc.chan.device->dev, "Descriptor 0x%p: Freed.", &vd->tx);
-    
 	kfree(me);
+	
+}
+
+static void s805_dma_desc_free (struct virt_dma_desc *vd)
+{
+
+	void * addr = &vd->tx;
+	struct s805_desc * me = to_s805_dma_desc(&vd->tx);
+	struct s805_chan * c = me->c;
+
+	__s805_dma_desc_free(me, c);
+
+	dev_dbg(c->vc.chan.device->dev, "Descriptor 0x%p: Freed.", addr);
 	
 	c->pending --;
 	
 	if (!c->pending)
 		c->status = S805_DMA_SUCCESS;
+	
 }
 
 /**
@@ -1961,7 +1958,7 @@ static void s805_dma_desc_free(struct virt_dma_desc *vd)
  *
  */
 static s805_dtable * s805_dma_get_next_addr (s805_dtable * desc) {
-
+	
 	s805_dtable * dtbl = desc;
 	int i;
 
@@ -2049,6 +2046,8 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 	s805_dtable *desc;
 	uint i = 0;
 #endif
+
+	spin_lock(&c->issued_lock);
 	
 	list_for_each_entry_safe (vd, tmp, &c->vc.desc_issued, node) {
 
@@ -2093,20 +2092,6 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 		
 #endif
 		
-		if (list_empty(&d->desc_list)) {
-			
-			/* 
-			   This descriptor comes from device_prep_interrupt, and nobody has added info into it, so mark the cookie as completed to trigger 
-			   the associated callback, and try to process any pending descriptors.
-			*/
-			
-			c->status = S805_DMA_SUCCESS;
-			
-			vchan_cookie_complete(&d->vd);
-		  	
-			continue;
-		}
-		
 		spin_lock(&mgr->lock);
 		list_add_tail(&d->elem, &mgr->scheduled);
 		spin_unlock(&mgr->lock);
@@ -2114,7 +2099,10 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
 		d->c->pending ++;
 		c->status = S805_DMA_IN_PROGRESS;	
 	}
+
+	spin_unlock(&c->issued_lock);
 }
+
 
 /**
  * s805_dma_fetch_tr - Perform a batch of previously scheduled transactions, zero if none is available, 
@@ -2125,8 +2113,9 @@ static void s805_dma_schedule_tr ( struct s805_chan * c ) {
  */
 static void s805_dma_fetch_tr ( uint ini_thread ) {
 	
-	uint thread, thread_mask = 0;
+	uint thread;
 	struct s805_desc * d, * aux;
+	bool empties = false;
 	
 #ifdef CONFIG_S805_DMAC_SERIALIZE
 	uint thread_disable = S805_DMA_MAX_THREAD;
@@ -2139,17 +2128,14 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 		s805_dma_to_stop(); /* To avoid false positives */
 #endif
 	
-	mgr->busy = (ini_thread > 0);
 	mgr->__pending = ini_thread;
-	
+		
 	for (thread = ini_thread; thread < mgr->max_thread; thread ++) {
-
-		s805_dma_thread_disable(thread);
 		
 	    d = list_first_entry_or_null(&mgr->scheduled, struct s805_desc, elem);
 		
 		while (d) {
-			
+
 			if (d->c->status != S805_DMA_PAUSED && d->c->status != S805_DMA_TERMINATED) {
 				
 				if (s805_desc_is_cyclic(d)) {
@@ -2174,12 +2160,19 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 					} else
 						goto next;
 #endif
+				} else if (s805_desc_is_empty(d)) {
+
+					/* Those won't interrupt us. */
+					
+					goto next;
+				
 				} else
 					break;
 				
 			} else {
-
+				
 			next:
+				
 				aux = d;
 				
 				if (list_is_last(&d->elem, &mgr->scheduled))
@@ -2188,12 +2181,27 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 					d = list_next_entry(d, elem);
 				
 				if (aux->c->status == S805_DMA_TERMINATED) {
-
+					
 					if (s805_desc_is_cyclic(aux) && mgr->cyclic_busy) 
 						mgr->cyclic_busy = false;
 					
+					if (s805_desc_is_crypto_cipher(aux) && mgr->cipher_busy) 
+						mgr->cipher_busy = false;
+					
+					spin_lock(&mgr->lock);
 					list_del(&aux->elem);
+					spin_unlock(&mgr->lock);
+					
 					s805_dma_desc_free(&aux->vd);
+					
+				} else if (s805_desc_is_empty(aux)) {
+					
+					spin_lock(&mgr->lock);
+					list_move_tail(&aux->elem, &mgr->in_progress);
+					spin_unlock(&mgr->lock);
+					
+					if (aux->c->status == S805_DMA_SUCCESS)
+						aux->c->status = S805_DMA_IN_PROGRESS;
 					
 				}
 			}			
@@ -2201,22 +2209,34 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 		
 		if (d) {
 			
-			list_move_tail(&d->elem, &mgr->in_progress);
-			
 		    d->next_chunk = s805_dma_allocate_tr (thread,
 												  d->next_chunk ? d->next_chunk : list_first_entry(&d->desc_list, s805_dtable, elem),
 												  d->frames);
 			
+			spin_lock(&mgr->lock);
+			list_move_tail(&d->elem, &mgr->in_progress);
+			spin_unlock(&mgr->lock);
+			
 			if (d->c->status == S805_DMA_SUCCESS)
 				d->c->status = S805_DMA_IN_PROGRESS;
-			
-			thread_mask |= (1 << thread);
-			
-		    mgr->busy = true;
+
 			mgr->__pending ++;
-		} 
+			
+		} else
+			break;
 	}
 
+	if (!mgr->__pending) {
+
+		if (list_empty(&mgr->in_progress)) 
+			mgr->busy = false;
+
+		else {
+
+			/* Only empty descriptors in the list, process them as completed and re-fetch transactions. */
+		    empties = true;
+		}
+	}
 
 #ifndef CONFIG_S805_DMAC_SERIALIZE
 #ifdef CONFIG_S805_DMAC_TO
@@ -2247,11 +2267,14 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 	
 	for (thread = 0; thread < thread_disable; thread ++) {
 		
-		if ((thread < ini_thread) || (thread_mask & (1 << thread)))
+		if (thread <= mgr->__pending)
 			s805_dma_thread_enable(thread);
 		else
 			s805_dma_thread_disable(thread);
 	}
+
+	if ( empties )
+		tasklet_hi_schedule(&mgr->tasklet_completed);
 }
 
 /**
@@ -2264,7 +2287,7 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 static s805_status s805_dma_process_next_desc ( struct s805_chan *c )
 {
 	
-	if (c->status != S805_DMA_PAUSED && c->status != S805_DMA_TERMINATED)	
+	if (c->status != S805_DMA_PAUSED && c->status != S805_DMA_TERMINATED) 	
 		s805_dma_schedule_tr(c);
 	
 	
@@ -2279,11 +2302,12 @@ static s805_status s805_dma_process_next_desc ( struct s805_chan *c )
 	   
 	*/
 
-	spin_lock(&mgr->lock);
-	if (!mgr->busy)  
+	if (!mgr->busy) {
+		
+		mgr->busy = true;
 		s805_dma_fetch_tr(0);
-	
-	spin_unlock(&mgr->lock);	
+		
+	}
 	
 	return c->status;
 }
@@ -2304,16 +2328,17 @@ static void s805_dma_process_completed ( unsigned long null )
 	if (mgr->timer_busy)
 		s805_dma_to_stop();
 #endif
+
 	
 	list_for_each_entry_safe (d, temp, &mgr->in_progress, elem) {
 		
 		/* All the transactions has been completed, process the finished descriptors.*/
+
+		list_del(&d->elem);
 		
 		if (likely(d->c->status != S805_DMA_TERMINATED)) {
 			
 			if (likely(!d->next_chunk)) {
-				
-				list_del(&d->elem);
 				
 				if (s805_desc_is_cyclic(d)) {
 					
@@ -2325,12 +2350,12 @@ static void s805_dma_process_completed ( unsigned long null )
 					
 					if (d->next->c->status != S805_DMA_PAUSED && mgr->cyclic_busy) {
 						
-						list_add_tail(&d->next->elem, &mgr->in_progress);
-						
 						/* Must always return NULL */
 						s805_dma_allocate_tr (thread,
 											  list_first_entry(&d->next->desc_list, s805_dtable, elem),
 											  d->next->frames);
+
+						list_add_tail(&d->next->elem, &mgr->in_progress);
 						
 						thread ++;
 							
@@ -2348,18 +2373,18 @@ static void s805_dma_process_completed ( unsigned long null )
 					dev_dbg(d->c->vc.chan.device->dev, "Marking cookie %d completed for channel %s.\n", d->vd.tx.cookie, dma_chan_name(&d->c->vc.chan));
 
 				    if (!s805_desc_is_crypto_crc(d)) {
-
+						
 #ifdef S805_CRYPTO_CIPHER
 						
 						if (s805_desc_is_crypto_cipher(d))
 							mgr->cipher_busy = false;
 #endif
 						spin_lock(&d->c->vc.lock);
-					
+						
 						vchan_cookie_complete(&d->vd);
-					
+						
 						spin_unlock(&d->c->vc.lock);
-
+						
 					} else 
 						d->vd.tx.callback(d->vd.tx.callback_param); /* !!! Won't free the descriptor, temporal until CRC irq is received.*/
 				}
@@ -2377,7 +2402,7 @@ static void s805_dma_process_completed ( unsigned long null )
 				
 				if (d->c->status != S805_DMA_PAUSED) {
 					
-					list_move_tail(&d->elem, &mgr->in_progress);
+					list_add_tail(&d->elem, &mgr->in_progress);
 					
 					d->next_chunk = s805_dma_allocate_tr (thread, d->next_chunk, d->frames);
 					
@@ -2386,7 +2411,7 @@ static void s805_dma_process_completed ( unsigned long null )
 				} else {
 
 					spin_lock(&mgr->lock);
-					list_move_tail(&d->elem, &mgr->scheduled);
+					list_add_tail(&d->elem, &mgr->scheduled);
 					spin_unlock(&mgr->lock);
 				}
 			}
@@ -2405,14 +2430,11 @@ static void s805_dma_process_completed ( unsigned long null )
 				mgr->cipher_busy = false;
 #endif
 			
-			list_del(&d->elem);
 			s805_dma_desc_free(&d->vd);
 		}
 	}
-
-	spin_lock(&mgr->lock);
+	
    	s805_dma_fetch_tr(thread);
-	spin_unlock(&mgr->lock);
 }
 
 /**
@@ -2578,11 +2600,12 @@ static int s805_dma_control (struct dma_chan *chan,
 					
 					spin_unlock(&c->vc.lock);
 					
-					spin_lock(&mgr->lock);
-					if (!mgr->busy) 
+					if (!mgr->busy) {
+						
+						mgr->busy = true;
 						s805_dma_fetch_tr(0);
-					
-					spin_unlock(&mgr->lock);
+						
+					}
 				}
 			}
 		}
@@ -2709,9 +2732,9 @@ static void s805_dma_issue_pending(struct dma_chan *chan)
 	
 	spin_lock(&c->vc.lock);
 	if (vchan_issue_pending(&c->vc))  {
+		spin_unlock(&c->vc.lock);
 		
 		s805_dma_process_next_desc(c);
-		spin_unlock(&c->vc.lock);
 		
 	} else
 		spin_unlock(&c->vc.lock);
@@ -2783,6 +2806,8 @@ static int s805_dma_chan_init (struct s805_dmadev *m)
 	
 	c->vc.desc_free = s805_dma_desc_free;
 	vchan_init(&c->vc, &m->ddev);
+	spin_lock_init(&c->prep_lock);
+	spin_lock_init(&c->issued_lock);
 	
 	c->status = S805_DMA_SUCCESS;
 	
