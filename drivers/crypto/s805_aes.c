@@ -564,7 +564,7 @@ static struct crypto_alg s805_aes_algs[] = {
 	   IV and key the same encryption is yield, depending on the position of the text. It is if texts "aaaaaaaaa" and "bbbbbbbb"
 	   are encrypted in this order encryptions will match if the order is preserved aswell as the IV and key, however, is we
 	   keep the key and IV and try to encrypt "bbbbbbbb" and "aaaaaaaaa", swaped, the resulting transform will differ. If 
-	   S805_DTBL_AES_RESET_IV is set to zero allways, encryptions won't match, no matter what.
+	   S805_DTBL_AES_RESET_IV is set to zero always, encryptions won't match, no matter what.
 
 	   I wasn't able to find the way to recover this data however.
 	   
