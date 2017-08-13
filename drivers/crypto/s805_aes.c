@@ -244,7 +244,7 @@ static void s805_aes_cpyiv_to_hw (struct skcipher_givcrypt_request * req , s805_
 	u32 * aux = (u32 *) req->giv;
 	
 	/* if (mode == AES_MODE_CTR) { */
-	/*  
+	
 	/* 	WR(aux[0], S805_AES_IV_3); */
 	/* 	WR(aux[1], S805_AES_IV_2); */
 	/* 	WR(aux[2], S805_AES_IV_1); */
