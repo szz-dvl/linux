@@ -1,5 +1,3 @@
-//#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
-
 #include <linux/platform_device.h>
 #include <linux/printk.h>
 #include <linux/dma-mapping.h>
@@ -47,8 +45,6 @@
 
 #define S805_DMA_THREAD_INIT(th)         (1 << (24 + th))
 #define S805_DMA_THREAD_ENABLE(th)       (1 << (8 + th))
-
-#define S805_DTBL_NO_BREAK               BIT(8) /* To be tested */
 
 struct memset_val {
 
@@ -323,21 +319,6 @@ static s805_dtable * sg_init_desc (struct s805_desc *d, s805_dtable * chunk) {
 
 /* Public functions, for crypto modules */
 
-/* static void s805_dma_desc_free(struct virt_dma_desc *vd); */
-
-/* /\** */
-/*  * s805_desc_early_free - Public funtion offered to crypto modules through "linux/s805_dmac.h",  */
-/*  * meant to "early" free a failed descriptor. */
-/*  * */
-/*  * @tx_desc: The descriptor to be closed. */
-/*  * */
-/*  *\/ */
-/* void s805_desc_early_free (struct dma_async_tx_descriptor * tx_desc) { */
-
-/*     s805_dma_desc_free(&to_s805_dma_desc(tx_desc)->vd); */
-/* } */
-
-
 /**
  * s805_crypto_set_req - Public funtion offered to crypto modules through "linux/s805_dmac.h", 
  * for crypto decriptors to hold all the information needed.
@@ -391,16 +372,12 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 	int next_burst;
 	bool new_block, src_completed;
 	uint act_size, icg, burst, min_size;
-		
+	
 	d = to_s805_dma_desc(tx_desc);
 	
 	if (s805_desc_is_crypto(d))
 		limit -= d->byte_count;
-	
-	spin_lock(&d->c->prep_lock);
-	
-	desc_tbl = sg_init_desc (d, NULL);
-	
+
 	/* Auxiliar struct to iterate the lists. */
 	src_info.cursor = src_sg;
 	dst_info.cursor = dst_sg;
@@ -411,6 +388,10 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 	src_info.bytes = 0;
 	dst_info.bytes = 0;
 	
+	spin_lock(&d->c->prep_lock);
+	
+	desc_tbl = sg_init_desc (d, NULL);
+
 	desc_tbl->table->src = src_addr = src_info.cursor ? sg_dma_address(src_info.cursor) : 0;
 	dst_addr = dst_info.cursor ? sg_dma_address(dst_info.cursor) : 0;
 
@@ -459,7 +440,7 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 		
 		/* Either src entry or dst entry or both are complete here.  */
 		
-		new_block = true;
+		new_block = true;	
 	    src_completed = false;
 		
 		if (sg_ent_complete(&src_info)) {
@@ -1869,6 +1850,7 @@ static inline void s805_dma_enable_hw ( void ) {
 	
 	/* Autosuspend, future Kconfig option. */
 	status &= ~S805_DMA_DMA_PM;
+	status &= ~BIT(30); /* CRC */
 	status |= S805_DMA_ENABLE;
 	
 	WR(status, S805_DMA_CTRL);
@@ -1938,6 +1920,10 @@ static void s805_dma_desc_free (struct virt_dma_desc *vd)
 	struct s805_desc * me = to_s805_dma_desc(&vd->tx);
 	struct s805_chan * c = me->c;
 
+	/* Temporal, untill CRC irq is received. */
+	/* if (s805_desc_is_crypto_crc(me)) */
+	/* 	return; */
+	
 	__s805_dma_desc_free(me, c);
 
 	dev_dbg(c->vc.chan.device->dev, "Descriptor 0x%p: Freed.", addr);
@@ -2229,7 +2215,7 @@ static void s805_dma_fetch_tr ( uint ini_thread ) {
 	if (!mgr->__pending) {
 
 		if (list_empty(&mgr->in_progress)) 
-			mgr->busy = false;
+			mgr->busy = false; /* Use an automatic here, deferr global busy till exit.*/
 
 		else {
 
@@ -2371,22 +2357,17 @@ static void s805_dma_process_completed ( unsigned long null )
 				} else {
 					
 					dev_dbg(d->c->vc.chan.device->dev, "Marking cookie %d completed for channel %s.\n", d->vd.tx.cookie, dma_chan_name(&d->c->vc.chan));
-
-				    if (!s805_desc_is_crypto_crc(d)) {
 						
 #ifdef S805_CRYPTO_CIPHER
 						
-						if (s805_desc_is_crypto_cipher(d))
-							mgr->cipher_busy = false;
+					if (s805_desc_is_crypto_cipher(d))
+						mgr->cipher_busy = false;
 #endif
-						spin_lock(&d->c->vc.lock);
-						
-						vchan_cookie_complete(&d->vd);
-						
-						spin_unlock(&d->c->vc.lock);
-						
-					} else 
-						d->vd.tx.callback(d->vd.tx.callback_param); /* !!! Won't free the descriptor, temporal until CRC irq is received.*/
+					spin_lock(&d->c->vc.lock);
+					
+					vchan_cookie_complete(&d->vd);
+					
+					spin_unlock(&d->c->vc.lock);	
 				}
 				
 			} else {

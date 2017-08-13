@@ -77,6 +77,7 @@ static s805_dtable * def_init_divx_tdesc (unsigned int frames)
 	/* Control common part */
 	desc_tbl->table->control |= S805_DTBL_PRE_ENDIAN(ENDIAN_NO_CHANGE);
 	desc_tbl->table->control |= S805_DTBL_INLINE_TYPE(INLINE_DIVX);
+	desc_tbl->table->control |= S805_DTBL_NO_BREAK;
 	
 	/* 
 	   We fix dst address to point to RK_FIFO register, is this correct? 

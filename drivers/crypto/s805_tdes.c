@@ -98,7 +98,8 @@ static s805_dtable * def_init_tdes_tdesc (unsigned int frames, s805_tdes_mode mo
 	/* Control common part */
 	desc_tbl->table->control |= S805_DTBL_PRE_ENDIAN(ENDIAN_NO_CHANGE);
 	desc_tbl->table->control |= S805_DTBL_INLINE_TYPE(INLINE_TDES);
-
+	desc_tbl->table->control |= S805_DTBL_NO_BREAK;
+	
 	if (!((frames + 1) % S805_DMA_MAX_DESC))
 		desc_tbl->table->control |= S805_DTBL_IRQ;
 

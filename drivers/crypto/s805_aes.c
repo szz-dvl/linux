@@ -29,6 +29,10 @@
 #define S805_DTBL_AES_RESET_IV(restr)         ((restr & 0x1) << 11)
 #define S805_DTBL_AES_MODE(mode)              ((mode & 0x3) << 12)
 
+/* Testing */
+#define S805_DTBL_AES_CTR_LIMIT(limit)        ((limit & 0x3) << 14)
+#define S805_DTBL_AES_CTR_ENDIAN(end)         ((end & 0xf) << 16)
+
 typedef enum aes_key_type {
 	AES_KEY_TYPE_128,
 	AES_KEY_TYPE_192,
@@ -75,9 +79,13 @@ struct s805_aes_reqctx {
 	s805_aes_key_type type;
 	s805_aes_mode mode;
 	s805_aes_dir dir;
+
+	struct scatterlist * ctr;
 	
 	struct list_head elem;
 };
+
+//u64 fixed_iv;
 
 static const struct of_device_id s805_aes_of_match[] =
 {
@@ -107,13 +115,14 @@ static s805_dtable * def_init_aes_tdesc (unsigned int frames, s805_aes_key_type 
 	/* Control common part */
 	desc_tbl->table->control |= S805_DTBL_PRE_ENDIAN(ENDIAN_NO_CHANGE);
 	desc_tbl->table->control |= S805_DTBL_INLINE_TYPE(INLINE_AES);
-
+	desc_tbl->table->control |= S805_DTBL_NO_BREAK;
+	
 	if (!((frames + 1) % S805_DMA_MAX_DESC))
 		desc_tbl->table->control |= S805_DTBL_IRQ;
 
 	/* Crypto block */
 	desc_tbl->table->crypto |= S805_DTBL_AES_POST_ENDIAN(ENDIAN_NO_CHANGE);
-	desc_tbl->table->crypto |= S805_DTBL_AES_PRE_ENDIAN(ENDIAN_NO_CHANGE); /* mode == AES_MODE_CTR && !dir ? ENDIAN_TYPE_7 : ENDIAN_NO_CHANGE*/
+	desc_tbl->table->crypto |= S805_DTBL_AES_PRE_ENDIAN(ENDIAN_NO_CHANGE);
 	desc_tbl->table->crypto |= S805_DTBL_AES_KEY_TYPE(type);
 	desc_tbl->table->crypto |= S805_DTBL_AES_DIR(dir);
 
@@ -126,10 +135,16 @@ static s805_dtable * def_init_aes_tdesc (unsigned int frames, s805_aes_key_type 
 	   to be decrypted at the same time too. If the latter condition is satisfied, this must increase encryption 
 	   secureness for CBC modes. Same thing will apply for DES variants CBC modes.
 	*/
-	desc_tbl->table->crypto |= S805_DTBL_AES_RESET_IV(mode ? !frames : 0); /* mode ? 1 : 0 (mode == AES_MODE_CBC) */
+
+	desc_tbl->table->crypto |= S805_DTBL_AES_RESET_IV(mode ? (mode == AES_MODE_CBC) ? !frames : !frames : 0); 
 	desc_tbl->table->crypto |= S805_DTBL_AES_MODE(mode);
 
-	/* CTR limit, CTR Endian: Untested! */
+	if (mode == AES_MODE_CTR) {
+
+		desc_tbl->table->crypto |= S805_DTBL_AES_CTR_LIMIT(0);
+		desc_tbl->table->crypto |= S805_DTBL_AES_CTR_ENDIAN(ENDIAN_NO_CHANGE);
+
+	}
 	
 	return desc_tbl;
 	
@@ -137,8 +152,8 @@ static s805_dtable * def_init_aes_tdesc (unsigned int frames, s805_aes_key_type 
 
 s805_dtable * sg_aes_move_along (struct s805_desc * d, s805_dtable * cursor) {
 
-	struct s805_aes_reqctx *rctx = ablkcipher_request_ctx((struct ablkcipher_request *) d->req);
-	
+	struct s805_aes_reqctx *rctx = ablkcipher_request_ctx((struct ablkcipher_request *)d->req);
+		
 	if (cursor) {
 		
 		list_add_tail(&cursor->elem, &d->desc_list);
@@ -179,18 +194,13 @@ static void s805_aes_seqiv_gen (struct skcipher_givcrypt_request * req, unsigned
 	struct s805_aes_ctx *ctx = crypto_ablkcipher_ctx(crypto_ablkcipher_reqtfm(&req->creq));
 	u64 seq;
 	
-	get_random_bytes_arch (&seq, sizeof(u64));
+	get_random_bytes_arch (req->giv, ivsize - sizeof(u64));
+	//memcpy(req->giv, &fixed_iv, sizeof(u64));
+	memset(req->giv + ivsize - sizeof(u64), 0, sizeof(u64));
 	
-	memset(req->giv, 0, ivsize - sizeof(u64));
-	
-	seq = cpu_to_be64(seq); /* Randomly generated, dosn't have much sense to me ... */
+	seq = cpu_to_be64(req->seq);
 	memcpy(req->giv + ivsize - sizeof(u64), &seq, sizeof(u64));
-	crypto_xor(req->giv, (const u8 *)ctx->key, ivsize);
-
-	/* memcpy(req->giv, ctx->key, ctx->keylen); */
-	/* if (ivsize < ctx->keylen) */
-	/* 	get_random_bytes_arch (req->giv + ctx->keylen, ivsize - ctx->keylen); */
-	
+	crypto_xor(req->giv, (const u8 *)ctx->key, ivsize);	
 }
 
 
@@ -229,21 +239,24 @@ static int s805_aes_iv_gen (struct skcipher_givcrypt_request * req, s805_aes_mod
 	
 }
 
-static inline void s805_aes_cpyiv_to_hw (struct skcipher_givcrypt_request * req /* ,rctx->mode, rctx->dir */) {
+static void s805_aes_cpyiv_to_hw (struct skcipher_givcrypt_request * req , s805_aes_mode mode, s805_aes_dir dir) {
 
 	u32 * aux = (u32 *) req->giv;
 	
-	/* WR(cpu_to_be32(aux[0]), S805_AES_IV_3); */
-	/* WR(cpu_to_be32(aux[1]), S805_AES_IV_2); */
-	/* WR(cpu_to_be32(aux[2]), S805_AES_IV_1); */
-	/* WR(cpu_to_be32(aux[3]), S805_AES_IV_0); */
-		
+	/* if (mode == AES_MODE_CTR) { */
+	/*  
+	/* 	WR(aux[0], S805_AES_IV_3); */
+	/* 	WR(aux[1], S805_AES_IV_2); */
+	/* 	WR(aux[2], S805_AES_IV_1); */
+	/* 	WR(aux[3], S805_AES_IV_0); */
 
+	/* } */
+	
 	WR(aux[0], S805_AES_IV_0);
 	WR(aux[1], S805_AES_IV_1);
 	WR(aux[2], S805_AES_IV_2);
 	WR(aux[3], S805_AES_IV_3);
-
+	
 }
 
 static inline void s805_aes_cpykey_to_hw (const u32 * key, unsigned int keylen) {
@@ -310,7 +323,7 @@ static int s805_aes_crypt_launch_job (struct ablkcipher_request *req, bool chain
 		s805_aes_cpykey_to_hw ((const u32 *) ctx->key, ctx->keylen);
 
 		if (rctx->mode)
-		    s805_aes_cpyiv_to_hw(skcipher_givcrypt_cast(&req->base) /* ,rctx->mode, rctx->dir */);
+		    s805_aes_cpyiv_to_hw(skcipher_givcrypt_cast(&req->base) ,rctx->mode, rctx->dir);
 		
 		tx_cookie = dmaengine_submit(rctx->tx_desc);
 		
@@ -449,7 +462,7 @@ static int s805_aes_crypt_prep (struct ablkcipher_request * req, s805_aes_mode m
 	}
 
 	s805_crypto_set_req(rctx->tx_desc, req);
-	
+
 	rctx->tx_desc = s805_scatterwalk (req->src, req->dst, rctx->tx_desc, req->nbytes, true);
 	
 	if (!rctx->tx_desc) {
@@ -505,7 +518,7 @@ static struct crypto_alg s805_aes_algs[] = {
 	.cra_name		    = "ecb(aes)-hw",
 	.cra_driver_name	= "s805-ecb-aes",
 	.cra_priority		= 100,
-	.cra_flags		    = CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC, //CRYPTO_ALG_GENIV | CRYPTO_ALG_TYPE_GIVCIPHER | 
+	.cra_flags		    = CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC, 
 	.cra_blocksize		= AES_BLOCK_SIZE,
 	.cra_ctxsize		= sizeof(struct s805_aes_ctx),
 	.cra_alignmask		= AES_BLOCK_SIZE - 1,
@@ -525,7 +538,7 @@ static struct crypto_alg s805_aes_algs[] = {
 	.cra_name		    = "cbc(aes)-hw",
 	.cra_driver_name	= "s805-cbc-aes",
 	.cra_priority		= 100,
-	.cra_flags		    = CRYPTO_ALG_TYPE_GIVCIPHER | CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC, //CRYPTO_ALG_GENIV | 
+	.cra_flags		    = CRYPTO_ALG_TYPE_GIVCIPHER | CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC,
 	.cra_blocksize		= AES_BLOCK_SIZE,
 	.cra_ctxsize		= sizeof(struct s805_aes_ctx),
 	.cra_alignmask		= AES_BLOCK_SIZE - 1,
@@ -543,10 +556,26 @@ static struct crypto_alg s805_aes_algs[] = {
 	}
 },
 {
+	/* 
+	   Not working: 
+	   
+	   Encryptions seems to be correct if S805_DTBL_AES_RESET_IV is set to one at least for the first frame of the transform,
+	   if is set to one every frame no difference can be appreciated. Encryptions seems correct means that for the same data,
+	   IV and key the same encryption is yield, depending on the position of the text. It is if texts "aaaaaaaaa" and "bbbbbbbb"
+	   are encrypted in this order encryptions will match if the order is preserved aswell as the IV and key, however, is we
+	   keep the key and IV and try to encrypt "bbbbbbbb" and "aaaaaaaaa", swaped, the resulting transform will differ. If 
+	   S805_DTBL_AES_RESET_IV is set to zero allways, encryptions won't match, no matter what.
+
+	   I wasn't able to find the way to recover this data however.
+	   
+	   Related: https://forum.odroid.com/viewtopic.php?f=117&t=27809
+	   
+	 */
+	
 	.cra_name		    = "ctr(aes)-hw",
 	.cra_driver_name	= "s805-ctr-aes",
 	.cra_priority		= 100,
-	.cra_flags		    = CRYPTO_ALG_TYPE_GIVCIPHER | CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC, //CRYPTO_ALG_GENIV | 
+	.cra_flags		    = CRYPTO_ALG_TYPE_GIVCIPHER | CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC, 
 	.cra_blocksize		= AES_BLOCK_SIZE,
 	.cra_ctxsize		= sizeof(struct s805_aes_ctx),
 	.cra_alignmask		= AES_BLOCK_SIZE - 1,
@@ -627,6 +656,8 @@ static int s805_aes_probe(struct platform_device *pdev)
 		dev_info(aes_mgr->dev, "s805 AES: grabbed dma channel (%s).\n", dma_chan_name(chan));
 		aes_mgr->chan = to_s805_dma_chan(chan);
 	}
+
+	//get_random_bytes_arch (&fixed_iv, sizeof(u64));
 	
     dev_info(aes_mgr->dev, "Loaded S805 AES crypto driver\n");
 

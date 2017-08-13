@@ -11,7 +11,7 @@
 #define S805_CRC_CHECK_SUM                   P_NDMA_CRC_OUT
 #define S805_CRC_CTRL                        P_AIU_CRC_CTRL
 
-#define S805_CRC_DIGEST_SIZE                 4
+#define S805_CRC_DIGEST_SIZE                 4 /* ¿¿ 2 ?? */
 #define S805_CRC_BLOCK_SIZE                  8 /* DMAC Block moves are aligned to 8 Bytes, seems fair. */
 
 #define S805_CRC_EXTRA_DEBUG                 S805_CRC_CTRL
@@ -21,6 +21,9 @@
 #define S805_CRC_P0LY_1                      P_AIU_CRC_POLY_COEF1
 #define S805_CRC_P0LY_0                      P_AIU_CRC_POLY_COEF0
 
+#define S805_CRC_BIT_CNT0                    P_AIU_CRC_BIT_CNT0
+#define S805_CRC_BIT_CNT1                    P_AIU_CRC_BIT_CNT1
+
 #define S805_CRC_P0LY_COEFS                  0x04C11DB7
 #define S805_CRC_P0LY_COEFS_R                0xEDB88320
 #define S805_CRC_P0LY_COEFS_RR               0x82608EDB
@@ -29,11 +32,9 @@
 #define S805_CRC_P0LY_COEFS_R_16             0xA001
 #define S805_CRC_P0LY_COEFS_RR_16            0xC002
 
-#define S805_CRC_ENABLE                      (BIT(15) | BIT(6) | BIT(8) | BIT(9) | BIT(10) | BIT(11) | BIT(12) | BIT(13))
+#define S805_CRC_ENABLE                      (BIT(15) | BIT(6) | BIT(8) | BIT(9) | BIT(10) | BIT(11) | BIT(12) | BIT(13)) /* Testing. */
 #define S805_CRC_AIU_CLK_GATE                P_HHI_GCLK_OTHER
 #define S805_CRC_ENABLE_CLK                  (BIT(14) | BIT(16))
-#define S805_CRC_CLK81                       P_HHI_GCLK_MPEG2
-#define S805_CRC_ENABLE_CLK81                BIT(29)
 
 #define S805_DTBL_CRC_NO_WRITE(val)          ((val & 0x1) << 4) 
 #define S805_DTBL_CRC_RESET(val)             ((val & 0x1) << 3)
@@ -60,12 +61,12 @@ struct s805_crc_mgr {
 struct s805_crc_reqctx {
 
 	struct dma_async_tx_descriptor * tx_desc;
-	//s805_init_desc * init_nfo;
-	bool initialized;
-	bool finalized;
-
-	/* struct scatterlist dst; */
 	
+	bool finalized;
+	bool initialized;
+	
+	/* struct scatterlist dst; */
+	uint bit_cnt;
 	struct list_head elem;
 
 };
@@ -101,7 +102,9 @@ static s805_dtable * def_init_crc_tdesc (unsigned int frames)
 	/* Control common part */
 	desc_tbl->table->control |= S805_DTBL_PRE_ENDIAN(ENDIAN_NO_CHANGE);
 	desc_tbl->table->control |= S805_DTBL_INLINE_TYPE(INLINE_CRC);
-
+	desc_tbl->table->control |= S805_DTBL_NO_BREAK;
+	//desc_tbl->table->control |= S805_DTBL_DST_HOLD;
+	
 	if (!((frames + 1) % S805_DMA_MAX_DESC))
 		desc_tbl->table->control |= S805_DTBL_IRQ;
 
@@ -109,10 +112,10 @@ static s805_dtable * def_init_crc_tdesc (unsigned int frames)
 	
 	/* Crypto block */
 	desc_tbl->table->crypto |= S805_DTBL_CRC_POST_ENDIAN(ENDIAN_NO_CHANGE);
-	desc_tbl->table->crypto |= S805_DTBL_CRC_RESET(!frames); /* To be tested. !frames*/
-	desc_tbl->table->crypto |= S805_DTBL_CRC_NO_WRITE(0);
+	desc_tbl->table->crypto |= S805_DTBL_CRC_RESET(!frames); /* Seems to be needed, otherwise no change in the CHECK_SUM register can be appreciated. */
+	desc_tbl->table->crypto |= S805_DTBL_CRC_NO_WRITE(0); /* If set to one a dest scatterlist must be provided, data will be written to it.*/
 	
-	desc_tbl->table->crypto |= S805_DTBL_CRC_COUNT((frames + 1)); /* Is this correct?, is the field really unused?. To be tested.*/
+	//desc_tbl->table->crypto |= S805_DTBL_CRC_COUNT((frames + 1)); /* Is this correct?, is the field really unused?. To be tested.*/
 	
 	return desc_tbl;
 	
@@ -140,11 +143,7 @@ static int s805_crc_launch_job (struct s805_crc_reqctx *ctx, bool chain) {
 
 		ctx->finalized = true;
 
-		WR(S805_CRC_P0LY_COEFS_16, S805_CRC_P0LY_1);
-		WR(S805_CRC_P0LY_COEFS_16, S805_CRC_P0LY_0);
 		WR(0, S805_CRC_CHECK_SUM);
-		//WR(0xFF00, S805_CRC_CTRL);
-		
 		
 		tx_cookie = dmaengine_submit(ctx->tx_desc);
 		
@@ -176,9 +175,8 @@ static void s805_crc_handle_completion (void * req_ptr) {
 	u32 result = RD(S805_CRC_CHECK_SUM);
 	memcpy(req->result, &result, S805_CRC_DIGEST_SIZE);
 
-	/* WR(~0U, S805_CRC_CHECK_SUM); */
-	
-	for (i = 1; i < 12; i++) {
+	/* Extra registers for debug, are those for our CRC ?? */
+	for (i = 1; i < 13; i++) {
 
 		u32 result = RD(S805_CRC_EXTRA_DEBUG + (i - 1));
 	
@@ -187,7 +185,6 @@ static void s805_crc_handle_completion (void * req_ptr) {
 
 	//print_hex_dump_bytes("Dest Content: ", DUMP_PREFIX_NONE, sg_virt(&job->dst), sg_dma_len(&job->dst));
 	//dma_free_coherent(NULL, sg_dma_len(&job->dst), sg_virt(&job->dst), sg_dma_address(&job->dst));
-	//WR(0xFFFF, S805_CRC_CTRL);
 	
 	spin_lock(&crc_mgr->lock);
 	list_del(&job->elem);
@@ -205,10 +202,18 @@ static void s805_crc_handle_completion (void * req_ptr) {
 		spin_unlock(&crc_mgr->lock);
 	}
 
+	/* 
+	   CRC engine may be waiting for some signal here, this code executes once DMA engine has already processed the descriptor, 
+	   so CRC engine must have all the needed information, however 0xffffffff is allways returned as a result, 
+	   and no IRQ is received in S805_CRC_IRQ (INT_AIU_CRC) line.
+	
+	*/
+	
 	req->base.complete(&req->base, 0);
 }
 
 /* Debug */
+#if 0
 static bool crc_map_dst (struct scatterlist * sg, uint len) {
 
 	sg_init_table(sg, 1);
@@ -228,6 +233,7 @@ static bool crc_map_dst (struct scatterlist * sg, uint len) {
 	return true;
 	
 }
+#endif
 
 static int s805_crc_add_data (struct ahash_request *req, bool last) {
 
@@ -254,13 +260,19 @@ static int s805_crc_add_data (struct ahash_request *req, bool last) {
 		
 	}
 	
-	ctx->tx_desc = s805_scatterwalk (req->src, req->src, ctx->tx_desc, req->nbytes, last); //dst = NULL
-
+	//print_hex_dump_bytes("My SRC: ", DUMP_PREFIX_ADDRESS, sg_virt(req->src), sg_dma_len(req->src));
+	
+	ctx->tx_desc = s805_scatterwalk (req->src, NULL, ctx->tx_desc, req->nbytes, last); //dst = NULL
+	
 	if (!ctx->tx_desc) {
 		
 		dev_err(crc_mgr->dev, "%s: Failed to add data chunk.\n", __func__);
 		return -ENOMEM;
 	}
+
+	
+
+	ctx->bit_cnt += (sg_dma_len(req->src) * 8);
 	
 	return 0;
 
@@ -270,19 +282,19 @@ static int s805_crc_init_ctx (struct ahash_request *req) {
 
 	struct s805_crc_reqctx *ctx = ahash_request_ctx(req);
 
+	//pr_warn("%s: initialized: %s, finalized: %s.\n", __func__, ctx->initialized ? "true" : "false", ctx->finalized ? "true" : "false");
+	
+	*ctx = (struct s805_crc_reqctx) { 0 };
+	
 	if (!IS_ALIGNED(req->nbytes, S805_CRC_BLOCK_SIZE)) {
 		
 	    crypto_ahash_set_flags(crypto_ahash_reqtfm(req), CRYPTO_TFM_RES_BAD_BLOCK_LEN);
 		return -EINVAL;
 		
 	}
-	
-	if (ctx->initialized)
-		return 1;
-	else if (ctx->finalized)
-		ctx->finalized = false;
-	
-	ctx->tx_desc = dmaengine_prep_dma_interrupt (&crc_mgr->chan->vc.chan, S805_DMA_CRYPTO_FLAG | S805_DMA_CRYPTO_CRC_FLAG); //S805_DMA_CRYPTO_CRC_FLAG: Won't free the descriptor table !!
+
+	/* May fail if someone tries to reinitialize an already initialized request. */
+	ctx->tx_desc = dmaengine_prep_dma_interrupt (&crc_mgr->chan->vc.chan, S805_DMA_CRYPTO_FLAG | S805_DMA_CRYPTO_CRC_FLAG);
 
 	if (!ctx->tx_desc) {
 		
@@ -293,6 +305,7 @@ static int s805_crc_init_ctx (struct ahash_request *req) {
 	ctx->tx_desc->callback = (void *) &s805_crc_handle_completion;
 	ctx->tx_desc->callback_param = (void *) req;
 
+	ctx->finalized = false;
 	ctx->initialized = true;
 	
 	return 0;
@@ -341,9 +354,7 @@ static int s805_crc_hash_final (struct ahash_request *req) {
 	spin_unlock(&crc_mgr->lock);
 	
 	return s805_crc_launch_job(ctx, false);
-	
-	return 0;
-
+    
 }
 
 static int s805_crc_hash_finup (struct ahash_request *req) {
@@ -375,7 +386,7 @@ static int s805_crc_hash_digest (struct ahash_request *req) {
 		dev_err(crc_mgr->dev, "%s: Failed to initialize context.\n", __func__);
 		return err;
 	}
-
+	
 	err = s805_crc_add_data (req, true);
 	
 	if (err) {
@@ -421,6 +432,17 @@ static void s805_crc_cra_exit(struct crypto_tfm *tfm)
 }
 
 static struct ahash_alg crc_alg = {
+
+	/* 
+	   Not working: 
+	   
+	   Always getting 0xffffffff as the result of the hash no matter what data is provided, registers from 0x1544 to 0x154f of CBUS are returned 
+	   in this implementation to inspect its content, not very sure that we are dealing with the same CRC engine. If this registers are ours
+	   it seems that we are dealing with CRC-16 by default, register 0x154a (AIU_CRC_POLY_COEF1) is loaded with the value 0x8005, those are the
+	   coeficients for CRC-16-ANSI. Again if this registers are ours we may have the chance to load custom polynomial coeficients so we can compute 
+	   up to CRC-32, however seems I'm missing something here. 
+	   
+	*/
 	.init		= s805_crc_hash_init,
 	.update		= s805_crc_hash_update,
 	.final		= s805_crc_hash_final,
@@ -431,8 +453,8 @@ static struct ahash_alg crc_alg = {
 	.halg.digestsize = S805_CRC_DIGEST_SIZE,
 	.halg.statesize  = sizeof(struct s805_crc_reqctx),
 	.halg.base	     = {
-		.cra_name		    = "crc-32-hw",
-		.cra_driver_name	= "s805-crc-32",
+		.cra_name		    = "crc-16-hw",
+		.cra_driver_name	= "s805-crc-16",
 		.cra_priority		= 100,
 		.cra_flags		    = CRYPTO_ALG_TYPE_AHASH | CRYPTO_ALG_ASYNC,
 		.cra_blocksize		= S805_CRC_BLOCK_SIZE,
@@ -447,7 +469,7 @@ static struct ahash_alg crc_alg = {
 static irqreturn_t s805_crc_callback (int irq, void *data)
 {
 
-	/* Never got one! */
+	/* Never got one!, is this IRQ for us? */
 	
     struct s805_crc_mgr * m = data;
 
@@ -474,22 +496,19 @@ static irqreturn_t s805_parser_callback (int irq, void *data)
 
 static int s805_crc_hw_enable ( void ) {
 
-	u32 status;// = RD(S805_DMA_CLK);
-	WR(/* status | S805_CRC_ENABLE */~0U, S805_DMA_CLK);
+	u32 status = RD(S805_DMA_CLK);
+	WR(status | S805_CRC_ENABLE/* ~0U */, S805_DMA_CLK);
 
 	status = RD(S805_CRC_AIU_CLK_GATE);
-	WR(status | S805_CRC_ENABLE_CLK, S805_CRC_AIU_CLK_GATE);
+	WR(status | S805_CRC_ENABLE_CLK/* ~0U */, S805_CRC_AIU_CLK_GATE);
 
-	status = RD(S805_CRC_CLK81);
-	WR(status | S805_CRC_ENABLE_CLK81, S805_CRC_CLK81);
-
-	status = RD(S805_CRC_IRQ_MASK);
-	WR(status | S805_CRC_IRQ_BITS, S805_CRC_IRQ_MASK);
+	/* status = RD(S805_CRC_IRQ_MASK); */
+	WR(/* status |  */S805_CRC_IRQ_BITS, S805_CRC_IRQ_MASK);
 	
-	if (request_irq(S805_CRC_PARSER_IRQ, s805_parser_callback, 0, "s805_parser_irq", crc_mgr))
+	if (request_irq(S805_CRC_PARSER_IRQ, s805_parser_callback, IRQF_SHARED, "s805_parser_irq", crc_mgr))
 		return -1;
 			
-	return request_irq(S805_CRC_IRQ, s805_crc_callback, 0, "s805_crc_irq", crc_mgr);
+	return request_irq(S805_CRC_IRQ, s805_crc_callback, IRQF_SHARED, "s805_crc_irq", crc_mgr);
 }
 
 static int s805_crc_probe(struct platform_device *pdev)
@@ -501,7 +520,7 @@ static int s805_crc_probe(struct platform_device *pdev)
 	
     crc_mgr = kzalloc(sizeof(struct s805_crc_mgr), GFP_KERNEL);
 	if (!crc_mgr) {
-		dev_err(&pdev->dev, "s805 CRC-32 mgr: Device failed to allocate.\n");
+		dev_err(&pdev->dev, "s805 CRC-16 mgr: Device failed to allocate.\n");
 		return -ENOMEM;
 	}
 
@@ -509,7 +528,7 @@ static int s805_crc_probe(struct platform_device *pdev)
 
 	if (s805_crc_hw_enable()) {
 
-		dev_err(&pdev->dev, "s805 CRC-32 mgr: Unable to set up hw.\n");
+		dev_err(&pdev->dev, "s805 CRC-16 mgr: Unable to set up hw.\n");
 		kfree(crc_mgr);
 		return -ENOMEM;
 
@@ -522,7 +541,7 @@ static int s805_crc_probe(struct platform_device *pdev)
 	
 	if (err) {
 		
-		dev_err(crc_mgr->dev, "s805 CRC-32: failed to register algorithm.\n");
+		dev_err(crc_mgr->dev, "s805 CRC-16: failed to register algorithm.\n");
 		kfree(crc_mgr);
 		return err;
 	}
@@ -534,7 +553,7 @@ static int s805_crc_probe(struct platform_device *pdev)
 	
 	if (!chan) {
 		
-		dev_err(crc_mgr->dev, "s805 CRC-32: failed to get dma channel.\n");
+		dev_err(crc_mgr->dev, "s805 CRC-16: failed to get dma channel.\n");
 		kfree(crc_mgr);
 		crypto_unregister_ahash(&crc_alg);
 		
@@ -542,13 +561,13 @@ static int s805_crc_probe(struct platform_device *pdev)
 		
 	} else {
 		
-		dev_info(crc_mgr->dev, "s805 CRC-32: grabbed dma channel (%s).\n", dma_chan_name(chan));
+		dev_info(crc_mgr->dev, "s805 CRC-16: grabbed dma channel (%s).\n", dma_chan_name(chan));
 		crc_mgr->chan = to_s805_dma_chan(chan);
 	}
 
 	
 	
-    dev_info(crc_mgr->dev, "Loaded S805 CRC-32 crypto driver\n");
+    dev_info(crc_mgr->dev, "Loaded S805 CRC-16 crypto driver\n");
 
 	return 0;
 }
@@ -578,6 +597,6 @@ static struct platform_driver s805_crc_driver = {
 module_platform_driver(s805_crc_driver);
 
 MODULE_ALIAS("platform:s805-crc");
-MODULE_DESCRIPTION("s805 CRC-32 hw acceleration support.");
+MODULE_DESCRIPTION("s805 CRC-16 hw acceleration support.");
 MODULE_AUTHOR("szz-dvl");
 MODULE_LICENSE("GPL v2");

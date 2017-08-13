@@ -16,6 +16,8 @@
 #define S805_DTBL_DST_HOLD               BIT(25)
 #define S805_DMA_CLK                     P_HHI_GCLK_MPEG1
 
+#define S805_DTBL_NO_BREAK               BIT(8) /* It really helps to reduce hardware failures. */
+
 typedef enum s805_dma_status {
 	S805_DMA_SUCCESS,
 	S805_DMA_IN_PROGRESS,
@@ -208,7 +210,6 @@ struct dma_async_tx_descriptor * s805_scatterwalk (struct scatterlist * src_sg,
 
 void s805_crypto_set_req (struct dma_async_tx_descriptor * tx_desc, void * req);
 bool s805_close_desc (struct dma_async_tx_descriptor * tx_desc); /* CRC  */
-/* void s805_desc_early_free (struct dma_async_tx_descriptor * tx_desc); */
 
 #ifdef CONFIG_CRYPTO_DEV_S805_AES
 s805_dtable * sg_aes_move_along (struct s805_desc *d, s805_dtable * cursor);
