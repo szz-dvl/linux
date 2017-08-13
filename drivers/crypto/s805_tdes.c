@@ -72,7 +72,7 @@ struct s805_tdes_reqctx {
 
 static const struct of_device_id s805_tdes_of_match[] =
 {
-    {.compatible = "aml,amls805-tdes"},
+    {.compatible = "s805,s805-tdes"},
 	{},
 };
 

@@ -75,29 +75,34 @@
     };
 	
 	dma: dma@0xda006000 {
-		compatible = "aml,amls805-dma";
+		compatible = "s805,s805-dma";
 		reg = <0xda006000 0x2000>;
 		interrupts = <0 36 1>; /* 68 - 32 */
 		aml,dma-channel-num = <4>; /* Amount of channels that will be offered under /sys/class/dma/, read more about this under "Documentation" */
 	};
 
 	s805-aes {
-		compatible = "aml,amls805-aes";
+		compatible = "s805,s805-aes";
 		status= "ok";
 	};
 
 	s805-tdes {
-		compatible = "aml,amls805-tdes";
+		compatible = "s805,s805-tdes";
 		status= "ok";
 	};
 
 	s805-crc {
-		compatible = "aml,amls805-crc";
+		compatible = "s805,s805-crc";
 		status= "ok";
 	};
 
 	s805-divx {
-		compatible = "aml,amls805-divx";
+		compatible = "s805,s805-divx";
+		status= "ok";
+	};
+
+	meson_spwm {
+		compatible = "meson8b,meson8b-soft-pwm";
 		status= "ok";
 	};
 	

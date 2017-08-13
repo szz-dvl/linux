@@ -89,7 +89,7 @@ struct s805_aes_reqctx {
 
 static const struct of_device_id s805_aes_of_match[] =
 {
-    {.compatible = "aml,amls805-aes"},
+    {.compatible = "s805,s805-aes"},
     {},
 };
 

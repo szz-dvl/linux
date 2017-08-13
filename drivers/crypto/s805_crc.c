@@ -75,7 +75,7 @@ struct s805_crc_mgr * crc_mgr;
 
 static const struct of_device_id s805_crc_of_match[] =
 {
-    {.compatible = "aml,amls805-crc"},
+    {.compatible = "s805,s805-crc"},
 	{},
 };
 

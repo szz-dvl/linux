@@ -100,7 +100,7 @@ static unsigned int dma_channels = 0;
 
 static const struct of_device_id s805_dma_of_match[] = 
 	{
-		{ .compatible = "aml,amls805-dma", },
+		{ .compatible = "s805,s805-dma", },
 		{},
 	};
 MODULE_DEVICE_TABLE(of, s805_dma_of_match);

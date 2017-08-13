@@ -50,7 +50,7 @@ struct s805_divx_mgr * divx_mgr;
 
 static const struct of_device_id s805_divx_of_match[] =
 {
-    {.compatible = "aml,amls805-divx"},
+    {.compatible = "s805,s805-divx"},
 	{},
 };
 
