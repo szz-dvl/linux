@@ -78,9 +78,9 @@
 		compatible = "s805,s805-dma";
 		reg = <0xda006000 0x2000>;
 		interrupts = <0 36 1>; /* 68 - 32 */
-		aml,dma-channel-num = <4>; /* Amount of channels that will be offered under /sys/class/dma/, read more about this under "Documentation" */
+		s805,dma-channel-num = <4>; /* Amount of channels that will be offered under /sys/class/dma/, read more about this under "Documentation" */
 	};
-
+	
 	s805-aes {
 		compatible = "s805,s805-aes";
 		status= "ok";

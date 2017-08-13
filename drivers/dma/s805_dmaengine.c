@@ -2910,7 +2910,7 @@ static int s805_dma_probe (struct platform_device *pdev)
 		
 		/* If no cmd line param present request DMA channel number from device tree */ 
 		if (of_property_read_u32(pdev->dev.of_node,
-								 "aml,dma-channel-num",
+								 "s805,dma-channel-num",
 								 &mgr->chan_available)) {
 			
 			dev_err(&pdev->dev, "Failed to get channel number\n");
