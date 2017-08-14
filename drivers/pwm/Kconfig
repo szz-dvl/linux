@@ -28,6 +28,13 @@ menuconfig PWM
 
 if PWM
 
+config MESON8B_SPWM
+	tristate "Meson-8B soft-pwm support"
+	depends on S805_DMAC
+	default m if S805_DMAC
+	help
+		Software PWM support for Meson 8B
+
 config PWM_AB8500
 	tristate "AB8500 PWM support"
 	depends on AB8500_CORE && ARCH_U8500
