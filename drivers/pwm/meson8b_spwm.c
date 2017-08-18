@@ -5,11 +5,15 @@
 #include <linux/stat.h>
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/scatterlist.h>
+#include <linux/ioport.h>
 #include <linux/s805_dmac.h>
 
 #define MESON8B_GPIO_CTRL_SIZE                  8
-#define MESON8B_GPIO_ALIGN_SIZE                 MESON8B_GPIO_CTRL_SIZE
-#define MESON8B_GPIO_Y_STR                      P_PREG_PAD_GPIO1_EN_N
+#define MESON8B_GPIO_ALIGN_SIZE                 8
+#define MESON8B_CBUS_PHYS(reg)                  IO_CBUS_PHY_BASE + CBUS_REG_OFFSET(reg)
+#define MESON8B_GPIO_Y_STR                      MESON8B_CBUS_PHYS(0x200F)
+#define MESON8B_GPIO_STR                        MESON8B_GPIO_Y_STR//P_PREG_PAD_GPIO1_EN_N
 
 typedef struct soft_pwm_gpio {
 
@@ -23,18 +27,11 @@ typedef struct soft_pwm_gpio {
 typedef struct soft_pwm_cycle {
 
 	struct dma_async_tx_descriptor * tx_desc;
-	unsigned long long * buf;
+    u64 * buf;
 	uint len;
 	dma_addr_t paddr;
 	
 } cycle;
-
-/* typedef struct gpio_bank { */
-
-/* 	unsigned long long * bank; */
-/* 	dma_addr_t paddr; */
-	
-/* } bank; */
 
 struct meson_soft_pwm {
 
@@ -43,10 +40,7 @@ struct meson_soft_pwm {
 	
 	struct list_head gpios;
 	cycle * cycle;
-	/* bank * reg; */
-
-	/* struct dma_pool *pool; */
-	
+   	
 	uint freq;
 
 	bool busy;
@@ -82,18 +76,19 @@ static void meson_swpm_set_gpio_duty (gpio * pin) {
 	uint i;
 	uint limit = spwm_mgr->cycle->len / MESON8B_GPIO_CTRL_SIZE;
     uint now;
-
+	
 	dev_warn(spwm_mgr->dev, "%s: gpio = %u, duty = %u\n", __func__, pin->num, pin->duty);
 	
 	for (i = 0; i < limit; i++) {
-
+		
 		now = ( limit / ( limit - i ));
 		
-		if ( now >= (100 / ( 100 - pin->duty )) )
-			spwm_mgr->cycle->buf[i] &= ~BIT(pin->num);
-		else
-			spwm_mgr->cycle->buf[i] |= BIT(pin->num);
-
+		if ( now >= (100 / ( 100 - pin->duty )) )	
+			spwm_mgr->cycle->buf[i] &= ~BIT(pin->num); /* Low 32, must hit CBUS 0x2010 */
+		else 
+			spwm_mgr->cycle->buf[i] |= BIT(pin->num);  /* Low 32, must hit CBUS 0x2010 */
+		
+		
 		//dev_warn(spwm_mgr->dev, "buff[%d]: 0x%016llx, now: %u\n", i, spwm_mgr->cycle->buf[i], now);
 	}
 }
@@ -114,23 +109,7 @@ static gpio * meson_swpm_get_gpio ( uint num ) {
 
 static ssize_t meson_swpm_show_duty (struct device *dev, struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%u", glob_duty);
-}
-
-static ssize_t meson_swpm_show_gpio (struct device *dev, struct device_attribute *attr, char *buf)
-{
-	gpio * pin;
-	uint val;
-	
-	if(!(sscanf(buf, "%u", &val)))
-		return	-EINVAL;
-
-	pin = meson_swpm_get_gpio ( val );
-	
-	if (!pin)
-		return sprintf(buf, "~NULL~");
-	else
-		return sprintf(buf, "gpio: %u, duty: %u %%\n", pin->num, pin->duty);
+	return sprintf(buf, "%u\n", glob_duty);
 }
 
 static ssize_t meson_swpm_set_duty (struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
@@ -147,7 +126,7 @@ static ssize_t meson_swpm_set_duty (struct device *dev, struct device_attribute 
 
 static ssize_t meson_swpm_show_enable (struct device *dev, struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%u", glob_enable);
+	return sprintf(buf, "%u\n", glob_enable);
 }
 
 static ssize_t meson_swpm_set_enable (struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
@@ -194,44 +173,60 @@ static ssize_t meson_swpm_set_gpio (struct device *dev, struct device_attribute 
 	return count;
 }
 
-
 static void meson_swpm_start_cycle (void) {
 
 	struct dma_slave_config config;
 	dma_cookie_t tx_cookie;
-	dma_addr_t mine, dos;
-	void * tres;
+	void * iomem;
+	uint i;
+	dma_addr_t phys;
 	
+	uint limit = spwm_mgr->cycle->len / MESON8B_GPIO_CTRL_SIZE;
+	
+	struct scatterlist * src = kzalloc(sizeof(struct scatterlist), GFP_KERNEL);
+	
+	sg_set_buf(src, spwm_mgr->cycle->buf, spwm_mgr->cycle->len/* 8 */);
+	sg_dma_address(src) = spwm_mgr->cycle->paddr;
+	sg_mark_end(src);
+		
 	spwm_mgr->busy = true;
 	
 	if (!spwm_mgr->cycle)
 	    goto out;
 
-	mine = virt_to_dma(spwm_mgr->chan->vc.chan.device->dev, (void *)MESON8B_GPIO_Y_STR);
-	dos = virt_to_dma(NULL, (void *)MESON8B_GPIO_Y_STR);
-	tres = dma_to_virt(spwm_mgr->chan->vc.chan.device->dev, mine);
+	iomem = __arm_ioremap(MESON8B_GPIO_STR, MESON8B_GPIO_CTRL_SIZE, MT_DEVICE);
+	//ioremap(MESON8B_GPIO_STR, MESON8B_GPIO_CTRL_SIZE);
 	
-    config.direction = DMA_MEM_TO_DEV;
-	config.dst_addr_width = DMA_SLAVE_BUSWIDTH_8_BYTES;
-	config.dst_addr = MESON8B_GPIO_Y_STR;//mine;//virt_to_phys((void *)MESON8B_GPIO_Y_STR);
-
-	//spwm_mgr->chan->vc.chan.device->dev
+	//phys = virt_to_dma(spwm_mgr->chan->vc.chan.device->dev, iomem); /* Will deliver the same address of next line. */
+	phys = dma_map_single(spwm_mgr->chan->vc.chan.device->dev, iomem, MESON8B_GPIO_CTRL_SIZE, DMA_FROM_DEVICE);
 	
-	dev_warn(spwm_mgr->dev, "dev: %u, dev addr: %p, dev_phys: 0x%08x, dev_dma: 0x%08x, dev_dma_dos: 0x%08x, back: %p\n",
-			 MESON8B_GPIO_Y_STR,
-			 (void *) MESON8B_GPIO_Y_STR,
-			 virt_to_phys((void *)MESON8B_GPIO_Y_STR),
-			 mine,
-			 dos, tres);
+    config.direction = DMA_DEV_TO_MEM;
+	config.src_addr_width = DMA_SLAVE_BUSWIDTH_8_BYTES;
+	config.src_addr = MESON8B_GPIO_STR;//phys  /* None of this achieve the expected */
+	
+	dev_warn(spwm_mgr->dev, "dev: 0x%08x, iomem: (%p, 0x%08x).\n",
+			 MESON8B_GPIO_STR,
+			 iomem, phys);
 	
 	dmaengine_slave_config(&spwm_mgr->chan->vc.chan, &config);
 
-    spwm_mgr->cycle->tx_desc = dmaengine_prep_dma_cyclic(&spwm_mgr->chan->vc.chan,
-														 spwm_mgr->cycle->paddr, 
-														 spwm_mgr->cycle->len,
-														 spwm_mgr->cycle->len,
-														 DMA_MEM_TO_DEV,
-														 0);
+	/* Legitimate code, must generate a pulse on the selected gpios */
+	
+	/* spwm_mgr->cycle->tx_desc = dmaengine_prep_dma_cyclic(&spwm_mgr->chan->vc.chan, */
+	/* 													 spwm_mgr->cycle->paddr,  */
+	/* 													 spwm_mgr->cycle->len, */
+	/* 													 spwm_mgr->cycle->len, */
+	/* 													 DMA_MEM_TO_DEV, */
+	/* 													 0); */
+	
+	/* Testing code, must read registers */
+    spwm_mgr->cycle->tx_desc = dmaengine_prep_slave_sg(&spwm_mgr->chan->vc.chan,
+													   src,
+													   /* 8, */spwm_mgr->cycle->len,
+													   DMA_DEV_TO_MEM,
+													   0);
+
+	kfree(src);
 
 	if (!spwm_mgr->cycle->tx_desc)
 		goto out;
@@ -243,6 +238,13 @@ static void meson_swpm_start_cycle (void) {
 
 	dma_async_issue_pending ( &spwm_mgr->chan->vc.chan );
 
+	dma_wait_for_async_tx(spwm_mgr->cycle->tx_desc);
+
+	for (i = 0; i < limit; i++) 
+		dev_warn(spwm_mgr->dev, "result[%d]: 0x%016llx.\n", i, spwm_mgr->cycle->buf[i]);
+	
+    //WR(~0U & ~(BIT(8) | BIT(7)) , iomem); ---> This will actually write the register ...
+	
  out:
 	spwm_mgr->busy = false;
 	return;
@@ -264,17 +266,6 @@ static bool meson_swpm_setup_cycle ( void ) {
 		return false;
 
 	}
-
-	/* spwm_mgr->reg = kzalloc (sizeof(bank), GFP_KERNEL); */
-	
-	/* if (!spwm_mgr->reg) { */
-		
-	/* 	dev_err(spwm_mgr->dev, "soft-pwm: No bank.\n"); */
-	/* 	kfree(spwm_mgr->cycle); */
-		
-	/* 	return false; */
-
-	/* } */
 	
 	spwm_mgr->cycle->len = ALIGN(spwm_mgr->freq * MESON8B_GPIO_CTRL_SIZE, MESON8B_GPIO_ALIGN_SIZE);
 	
@@ -294,7 +285,6 @@ static bool meson_swpm_setup_cycle ( void ) {
 
 	dev_err(spwm_mgr->dev, "soft-pwm: No DMA, cycle, (%p, 0x%08x).\n", spwm_mgr->cycle->buf, spwm_mgr->cycle->paddr);
 	kfree (spwm_mgr->cycle);
-	/* kfree (spwm_mgr->reg); */
 	
 	return false;
 }
@@ -306,7 +296,7 @@ static void meson_swpm_free_cycle ( void ) {
 	
 }
 
-static	DEVICE_ATTR(gpio, S_IRWXUGO, meson_swpm_show_gpio, meson_swpm_set_gpio);
+static	DEVICE_ATTR(gpio, S_IWUGO | S_IXUGO, NULL, meson_swpm_set_gpio);
 static	DEVICE_ATTR(duty, S_IRWXUGO, meson_swpm_show_duty, meson_swpm_set_duty);
 static	DEVICE_ATTR(enable, S_IRWXUGO, meson_swpm_show_enable, meson_swpm_set_enable);
 
@@ -317,7 +307,7 @@ static struct attribute *meson_spwm_sysfs_entries[] = {
 	NULL
 };
 static struct attribute_group meson_spwm_attr_group = {
-	.name   = NULL,
+	.name   = "soft-pwm",
 	.attrs  = meson_spwm_sysfs_entries,
 };
 
@@ -362,20 +352,6 @@ static int meson_spwm_probe(struct platform_device *pdev)
 			goto err_no_spwm;
 		}	
 	}
-
-	/* spwm_mgr->pool = dma_pool_create_restore(dev_name(spwm_mgr->dev), */
-	/* 										 spwm_mgr->dev, */
-	/* 										 MESON8B_GPIO_CTRL_SIZE, */
-	/* 										 MESON8B_GPIO_CTRL_SIZE, */
-	/* 										 0); */
-	
-	/* if (!spwm_mgr->pool) { */
-		
-	/* 	dev_err(dev, "soft-pwm: Unable to allocate bank pool.\n"); */
-	/* 	ret = -ENOMEM; */
-
-	/* 	goto err_no_spwm; */
-	/* } */
 	
 	dma_cap_zero(mask);
 	dma_cap_set(DMA_CYCLIC, mask);
@@ -448,7 +424,7 @@ static int meson_spwm_remove(struct platform_device *pdev)
 #pragma GCC diagnostic pop
 
 	dma_release_channel ( &m->chan->vc.chan );
-	/* dma_pool_destroy ( m->pool ); */
+	sysfs_remove_group(&spwm_mgr->dev->kobj, &meson_spwm_attr_group);
 	kfree(m);
 	
 	return ret;
@@ -481,3 +457,5 @@ MODULE_ALIAS("platform:meson-spwm");
 MODULE_DESCRIPTION("Meson-8b soft-pwm.");
 MODULE_AUTHOR("szz-dvl");
 MODULE_LICENSE("GPL v2");
+
+/* This code has been tested for both VMSPLIT_2G and VMSPLIT_3G, always with no success. */

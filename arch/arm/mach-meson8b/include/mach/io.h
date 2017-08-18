@@ -107,7 +107,13 @@
 #define IO_CBUS_BASE        IO_CBUS_PHY_BASE       ///2M
 #define IO_AXI_BUS_BASE     IO_AXI_BUS_PHY_BASE    ///1M
 #define IO_PL310_BASE       IO_PL310_PHY_BASE      ///4k
-#define IO_PERIPH_BASE      IO_PERIPH_PHY_BASE     ///4k
+
+//szz
+#define IO_PERIPH_BASE      IO_A9_PERIPH_PHY_BASE    //4k 
+#define IO_A9_PERIPH_BASE	IO_A9_PERIPH_PHY_BASE    // 16k
+#define IO_MMC_BUS_BASE     IO_MMC_PHY_BASE          // 32K
+#define IO_SRAM_BASE	    IO_SRAM_PHY_BASE         // 128K
+
 #define IO_APB_BUS_BASE     IO_APB_BUS_PHY_BASE    ///8k
 #define IO_DOS_BUS_BASE     IO_DOS_BUS_PHY_BASE    ///64k
 #define IO_AOBUS_BASE       IO_AOBUS_PHY_BASE      ///1M

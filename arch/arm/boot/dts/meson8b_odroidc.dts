@@ -103,7 +103,7 @@
 
 	meson_spwm {
 		compatible = "meson8b,meson8b-soft-pwm";
-		meson8b,spwm-freq = <1000>;
+		meson8b,spwm-freq = <100>;
 		status= "ok";
 	};
 	
