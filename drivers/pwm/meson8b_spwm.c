@@ -13,7 +13,8 @@
 #define MESON8B_GPIO_ALIGN_SIZE                 8
 #define MESON8B_CBUS_PHYS(reg)                  IO_CBUS_PHY_BASE + CBUS_REG_OFFSET(reg)
 #define MESON8B_GPIO_Y_STR                      MESON8B_CBUS_PHYS(0x200F)
-#define MESON8B_GPIO_STR                        MESON8B_GPIO_Y_STR//P_PREG_PAD_GPIO1_EN_N
+#define MESON8B_GPIO_STR                        MESON8B_GPIO_Y_STR
+#define MESON8B_GPIO_VIRT_STR                   P_PREG_PAD_GPIO1_EN_N
 
 typedef struct soft_pwm_gpio {
 
@@ -175,14 +176,14 @@ static ssize_t meson_swpm_set_gpio (struct device *dev, struct device_attribute 
 
 static void meson_swpm_start_cycle (void) {
 
+	uint limit = spwm_mgr->cycle->len / MESON8B_GPIO_CTRL_SIZE;
 	struct dma_slave_config config;
 	dma_cookie_t tx_cookie;
 	void * iomem;
 	uint i;
 	dma_addr_t phys;
-	
-	uint limit = spwm_mgr->cycle->len / MESON8B_GPIO_CTRL_SIZE;
-	
+
+	/* Testing, to read registers. */
 	struct scatterlist * src = kzalloc(sizeof(struct scatterlist), GFP_KERNEL);
 	
 	sg_set_buf(src, spwm_mgr->cycle->buf, spwm_mgr->cycle->len/* 8 */);
@@ -194,18 +195,19 @@ static void meson_swpm_start_cycle (void) {
 	if (!spwm_mgr->cycle)
 	    goto out;
 
+	//iomem = ioremap(MESON8B_GPIO_STR, MESON8B_GPIO_CTRL_SIZE); /* Next line will deliver the same address. */
 	iomem = __arm_ioremap(MESON8B_GPIO_STR, MESON8B_GPIO_CTRL_SIZE, MT_DEVICE);
-	//ioremap(MESON8B_GPIO_STR, MESON8B_GPIO_CTRL_SIZE);
 	
-	//phys = virt_to_dma(spwm_mgr->chan->vc.chan.device->dev, iomem); /* Will deliver the same address of next line. */
+	//phys = virt_to_dma(spwm_mgr->chan->vc.chan.device->dev, iomem); /* Next line will deliver the same address. */
 	phys = dma_map_single(spwm_mgr->chan->vc.chan.device->dev, iomem, MESON8B_GPIO_CTRL_SIZE, DMA_FROM_DEVICE);
 	
     config.direction = DMA_DEV_TO_MEM;
 	config.src_addr_width = DMA_SLAVE_BUSWIDTH_8_BYTES;
-	config.src_addr = MESON8B_GPIO_STR;//phys  /* None of this achieve the expected */
+	config.src_addr = MESON8B_GPIO_STR;//MESON8B_GPIO_VIRT_STR;//phys;  /* None of those achieve the expected */
 	
-	dev_warn(spwm_mgr->dev, "dev: 0x%08x, iomem: (%p, 0x%08x).\n",
+	dev_warn(spwm_mgr->dev, "dev: 0x%08x, dev_virt: %p, iomem: (%p, 0x%08x).\n",
 			 MESON8B_GPIO_STR,
+			 (void *) MESON8B_GPIO_VIRT_STR,
 			 iomem, phys);
 	
 	dmaengine_slave_config(&spwm_mgr->chan->vc.chan, &config);
@@ -219,7 +221,7 @@ static void meson_swpm_start_cycle (void) {
 	/* 													 DMA_MEM_TO_DEV, */
 	/* 													 0); */
 	
-	/* Testing code, must read registers */
+	/* Testing code, must read registers CBUS 0x200F and CBUS 0x2010 to src. */
     spwm_mgr->cycle->tx_desc = dmaengine_prep_slave_sg(&spwm_mgr->chan->vc.chan,
 													   src,
 													   /* 8, */spwm_mgr->cycle->len,
@@ -238,12 +240,14 @@ static void meson_swpm_start_cycle (void) {
 
 	dma_async_issue_pending ( &spwm_mgr->chan->vc.chan );
 
+	/* Testing ---> Debug. */
 	dma_wait_for_async_tx(spwm_mgr->cycle->tx_desc);
 
 	for (i = 0; i < limit; i++) 
 		dev_warn(spwm_mgr->dev, "result[%d]: 0x%016llx.\n", i, spwm_mgr->cycle->buf[i]);
 	
     //WR(~0U & ~(BIT(8) | BIT(7)) , iomem); ---> This will actually write the register ...
+	//u32 reg = RD(iomem) ---> This will actually read the register ...
 	
  out:
 	spwm_mgr->busy = false;
